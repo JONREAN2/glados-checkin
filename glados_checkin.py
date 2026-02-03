@@ -14,6 +14,8 @@ class GLaDOSChecker:
         self._validate_env()
         self.email = os.environ["GLADOS_EMAIL"]
         self.cookie = os.environ["GLADOS_COOKIE"]
+        self.email = os.environ["GLADOS_EMAIL2"]
+        self.cookie = os.environ["GLADOS_COOKIE2"]
         self.bot_token = os.environ["TG_BOT_TOKEN"]
         self.chat_id = os.environ["TG_CHAT_ID"]
         
