@@ -1,4 +1,3 @@
-# GLaDOS Auto Checkin
 
 自动签到GLaDOS账户并通过Telegram通知
 
