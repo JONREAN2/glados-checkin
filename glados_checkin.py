@@ -20,7 +20,7 @@ class GLaDOSChecker:
         self.chat_id = os.environ["TG_CHAT_ID"]
         
     def _validate_env(self):
-        required = {"GLADOS_EMAIL", "GLADOS_COOKIE", "TG_BOT_TOKEN", "TG_CHAT_ID"}
+        required = {"GLADOS_EMAIL", "GLADOS_COOKIE","GLADOS_EMAIL2", "GLADOS_COOKIE2","TG_BOT_TOKEN", "TG_CHAT_ID"}
         missing = required - set(os.environ)
         if missing:
             raise ValueError(f"Missing environment variables: {', '.join(missing)}")
