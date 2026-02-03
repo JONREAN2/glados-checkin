@@ -26,6 +26,8 @@ jobs:
       env:
         GLADOS_EMAIL: ${{ secrets.GLADOS_EMAIL }}
         GLADOS_COOKIE: ${{ secrets.GLADOS_COOKIE }}
+        GLADOS_EMAIL2: ${{ secrets.GLADOS_EMAIL2 }}
+        GLADOS_COOKIE2: ${{ secrets.GLADOS_COOKIE2 }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: python glados_checkin.py
