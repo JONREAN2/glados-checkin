@@ -9,9 +9,12 @@ LOGIN_API = f"{BASE}/api/auth/login"
 DASHBOARD_URL = f"{BASE}/dashboard"
 CHECKIN_API_PATTERN = "**/api/checkin"
 
+# TG Bot 配置
 TG_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
-ACCOUNTS = os.getenv("OKEMBY_ACCOUNT")  # 格式: user1#pass1&user2#pass2
+
+# 多账号配置，格式: user1#pass1&user2#pass2
+ACCOUNTS = os.getenv("OKEMBY_ACCOUNT")  
 
 def send_tg(msg):
     if not TG_TOKEN or not TG_CHAT_ID:
@@ -70,14 +73,20 @@ async def run_account(username, password):
             await page.wait_for_load_state("networkidle")
             await page.wait_for_timeout(random.randint(3000,6000))
 
-            # 4️⃣ 点击图标+文字签到按钮
-            print("🚀 点击签到按钮")
+            # 4️⃣ 判断是否已签到
+            if await page.locator("text=今日已签到").count() > 0:
+                result += "ℹ 今日已签到，无需再次操作\n"
+                return result
+
+            # 5️⃣ 点击签到卡片
+            print("🚀 点击签到卡片")
             retries = 3
             for i in range(retries):
                 try:
+                    await page.wait_for_selector('[data-checkin-card="default"]', timeout=20000)
+
                     async with page.expect_response(CHECKIN_API_PATTERN, timeout=15000) as response_info:
-                        # ✅ 终极稳定点击方式
-                        await page.locator("button:has-text('签到')").first.click()
+                        await page.locator('[data-checkin-card="default"]').click(force=True)
 
                     response = await response_info.value
                     data = await response.json()
@@ -87,8 +96,7 @@ async def run_account(username, password):
                         result += f"✅ 签到成功，获得 {amount} RCoin\n"
                         break
                     else:
-                        msg = data.get("message")
-                        result += f"⚠ 第{i+1}次失败: {msg}\n"
+                        result += f"⚠ 第{i+1}次失败: {data.get('message')}\n"
 
                     await page.wait_for_timeout(3000)
 
