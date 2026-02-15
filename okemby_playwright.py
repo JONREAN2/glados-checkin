@@ -5,9 +5,8 @@ import requests
 from playwright.async_api import async_playwright
 
 BASE = "https://www.okemby.com"
-LOGIN_API = f"{BASE}/api/auth/login"
-STATUS_API = f"{BASE}/api/checkin/status"
-CHECKIN_API = f"{BASE}/api/checkin"
+LOGIN_URL = f"{BASE}/login"
+CHECKIN_URL = f"{BASE}/checkin"
 
 ACCOUNTS = os.getenv("OKEMBY_ACCOUNT")
 TG_TOKEN = os.getenv("TG_BOT_TOKEN")
@@ -28,63 +27,57 @@ async def run_account(browser, username, password):
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
         viewport={"width": 1920, "height": 1080},
         locale="zh-CN",
-        timezone_id="Asia/Shanghai"
+        timezone_id="Asia/Shanghai",
     )
 
-    # 屏蔽自动化特征
     await context.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
     """)
 
     page = await context.new_page()
     try:
-        # 过 CF 关键：等待页面 + 等待验证
+        # 1. 进主页过 CF 验证
         await page.goto(BASE, timeout=120000)
-        await page.wait_for_timeout(random.uniform(8, 12))
-        await page.wait_for_selector("body", timeout=60000)
         await page.wait_for_timeout(random.uniform(3, 6))
+        await page.wait_for_selector("body", timeout=60000)
+        await page.wait_for_timeout(random.uniform(2, 4))
 
-        # 登录
-        login_res = await page.evaluate("""async (d) => {
-            const r = await fetch(d.url, {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ userName: d.user, password: d.pwd, verificationToken: null })
-            });
-            return await r.json();
-        }""", {"url": LOGIN_API, "user": username, "pwd": password})
+        # 2. 去登录页
+        await page.goto(LOGIN_URL, timeout=60000)
+        await page.wait_for_timeout(random.uniform(2, 4))
 
-        token = login_res.get("token")
-        if not token:
-            result += "❌ 登录失败\n"
+        # 3. 模拟人工输入登录（关键！）
+        await page.fill('input[name="userName"]', username, delay=random.randint(120, 200))
+        await page.fill('input[name="password"]', password, delay=random.randint(100, 180))
+        await page.wait_for_timeout(random.uniform(1, 2))
+        await page.click('button[type="submit"]', delay=random.randint(300, 600))
+        await page.wait_for_timeout(random.uniform(3, 5))
+
+        # 判断是否登录成功
+        if "login" in page.url:
+            result += "❌ 登录失败（账号或密码错误）\n"
             return result
 
         result += "✅ 登录成功\n"
 
-        # 状态
-        status = await page.evaluate("""async (d) => {
-            const r = await fetch(d.url, { headers: { Authorization: "Bearer " + d.token } });
-            return await r.json();
-        }""", {"url": STATUS_API, "token": token})
+        # 4. 进入签到页
+        await page.goto(CHECKIN_URL, timeout=60000)
+        await page.wait_for_timeout(random.uniform(2, 4))
 
-        if status.get("hasCheckedInToday"):
-            result += f"ℹ️ 今日已签到：{status.get('amount')} RCoin\n"
-            return result
-
-        # 签到
-        check = await page.evaluate("""async (d) => {
-            const r = await fetch(d.url, { method: "POST", headers: { Authorization: "Bearer " + d.token } });
-            return await r.json();
-        }""", {"url": CHECKIN_API, "token": token})
-
-        if check.get("success"):
-            result += f"✅ 签到成功：{check.get('amount')} RCoin"
+        # 5. 点击签到按钮
+        checkin_btn = page.locator('button:has-text("每日签到")')
+        if await checkin_btn.count() > 0:
+            await checkin_btn.click(delay=random.randint(400, 700))
+            await page.wait_for_timeout(random.uniform(2, 3))
+            result += "✅ 签到成功"
         else:
-            result += f"❌ 签到失败：{check}"
+            result += "ℹ️ 今日已签到"
 
     except Exception as e:
-        result += f"❌ 异常：{str(e)[:100]}"
+        result += f"❌ 异常：{str(e)[:120]}"
     finally:
         await context.close()
     return result
@@ -94,7 +87,7 @@ async def main():
         print("未配置账号")
         return
 
-    msg = "📢 OKEmby 自动签到（过CF版）\n"
+    msg = "📢 OKEmby 自动签到（过CF修复版）\n"
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -102,6 +95,7 @@ async def main():
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
+                "--start-maximized",
             ]
         )
 
@@ -110,7 +104,7 @@ async def main():
                 u, p = acc.split("#", 1)
                 msg += await run_account(browser, u, p)
                 await asyncio.sleep(random.uniform(20, 40))
-            except:
+            except Exception as e:
                 msg += f"\n❌ 账号解析失败：{acc}"
 
         await browser.close()
