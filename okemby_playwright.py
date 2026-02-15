@@ -9,20 +9,23 @@ BASE = "https://www.okemby.com"
 TG_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
+
 def send_tg(msg):
-    """发送 Telegram 通知"""
     if not TG_TOKEN or not TG_CHAT_ID:
-        print("⚠ 未配置TG通知")
+        print("⚠ 未配置 TG 通知")
         return
+
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     data = {
         "chat_id": TG_CHAT_ID,
         "text": msg
     }
+
     try:
-        requests.post(url, data=data)
+        requests.post(url, data=data, timeout=20)
     except Exception as e:
-        print("⚠ Telegram 发送失败:", e)
+        print("TG 发送失败:", e)
+
 
 async def run_account(username, password):
     result = f"\n====== {username} ======\n"
@@ -33,20 +36,31 @@ async def run_account(username, password):
         page = await context.new_page()
 
         try:
-            print("🌐 访问首页 (等待CF)")
+            print("🌐 访问首页 (等待CF验证)")
             await page.goto(BASE, timeout=60000)
-            await page.wait_for_timeout(random.randint(4000,7000))
+            await page.wait_for_timeout(random.randint(4000, 7000))
 
-            print("🔐 登录")
+            print("🔐 打开登录页")
             await page.goto(f"{BASE}/login")
-            await page.fill('input[placeholder="用户名"]', username)
-            await page.fill('input[placeholder="密码"]', password)
-            await page.click("button:has-text('登录')")
-            await page.wait_for_timeout(random.randint(4000,6000))
+
+            # 等待用户名输入框出现（关键）
+            await page.wait_for_selector('input[name="userName"]', timeout=60000)
+
+            print("✍ 填写账号密码")
+            await page.fill('input[name="userName"]', username)
+            await page.fill('input[name="password"]', password)
+
+            print("🚀 点击登录")
+            try:
+                await page.click('button[type="submit"]')
+            except:
+                await page.locator("button").filter(has_text="登录").click()
+
+            await page.wait_for_timeout(random.randint(4000, 6000))
 
             print("📊 进入 dashboard")
             await page.goto(f"{BASE}/dashboard")
-            await page.wait_for_timeout(random.randint(3000,5000))
+            await page.wait_for_timeout(random.randint(4000, 6000))
 
             content = await page.content()
 
@@ -56,9 +70,9 @@ async def run_account(username, password):
             else:
                 print("🟡 尝试签到")
                 try:
-                    await page.click("button:has-text('签到')")
+                    await page.locator("button").filter(has_text="签到").click()
                     await page.wait_for_timeout(3000)
-                    print("✅ 签到完成")
+                    print("✅ 签到成功")
                     result += "✅ 签到成功\n"
                 except:
                     print("⚠ 未找到签到按钮")
@@ -74,6 +88,7 @@ async def run_account(username, password):
 
     return result
 
+
 async def main():
     accounts = os.getenv("OKEMBY_ACCOUNT")
 
@@ -82,19 +97,22 @@ async def main():
         return
 
     accounts = accounts.split("&")
+
     final_msg = "📢 OKEmby 自动签到结果\n"
 
     for acc in accounts:
         try:
             username, password = acc.split("#")
         except:
-            print(f"⚠ 账号格式错误: {acc}")
+            print("⚠ 账号格式错误:", acc)
             continue
+
         res = await run_account(username, password)
         final_msg += res
 
     print(final_msg)
     send_tg(final_msg)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
