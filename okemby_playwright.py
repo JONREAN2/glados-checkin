@@ -29,6 +29,14 @@ def send_tg(msg):
     except Exception as e:
         print("TG 发送失败:", e)
 
+async def wait_loading_end(page):
+    """等待页面动画/加载结束"""
+    try:
+        while await page.evaluate("window.isLoadingAnimating ? window.isLoadingAnimating() : false"):
+            await page.wait_for_timeout(500)
+    except:
+        pass
+
 async def run_account(username, password):
     result = f"\n====== {username} ======\n"
 
@@ -43,8 +51,9 @@ async def run_account(username, password):
             await page.goto(BASE, timeout=60000)
             await page.wait_for_load_state("networkidle")
             await page.wait_for_timeout(random.randint(4000,7000))
+            await wait_loading_end(page)
 
-            # 2️⃣ 浏览器内 API 登录
+            # 2️⃣ API 登录
             print("🔐 API 登录")
             login_res = await page.evaluate(f"""
             async () => {{
@@ -60,7 +69,6 @@ async def run_account(username, password):
                 return await res.json();
             }}
             """)
-
             token = login_res.get("token")
             if not token:
                 result += f"❌ 登录失败: {login_res.get('message')}\n"
@@ -71,7 +79,7 @@ async def run_account(username, password):
             print("📊 进入 dashboard")
             await page.goto(DASHBOARD_URL, timeout=60000)
             await page.wait_for_load_state("networkidle")
-            await page.wait_for_timeout(random.randint(3000,6000))
+            await wait_loading_end(page)
 
             # 4️⃣ 判断是否已签到
             if await page.locator("text=今日已签到").count() > 0:
@@ -83,10 +91,8 @@ async def run_account(username, password):
             retries = 3
             for i in range(retries):
                 try:
-                    # 等待卡片存在（不强制 visible，因为可能动画或旋转）
-                    await page.wait_for_selector('[data-checkin-card="default"]', timeout=20000)
+                    await page.wait_for_selector('[data-checkin-card="default"]', state="attached", timeout=20000)
 
-                    # 点击卡片并监听签到接口响应
                     async with page.expect_response(CHECKIN_API_PATTERN, timeout=15000) as response_info:
                         await page.locator('[data-checkin-card="default"]').click(force=True)
 
@@ -99,7 +105,6 @@ async def run_account(username, password):
                         break
                     else:
                         result += f"⚠ 第{i+1}次失败: {data.get('message')}\n"
-
                     await page.wait_for_timeout(3000)
 
                 except Exception as e:
