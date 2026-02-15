@@ -2,7 +2,7 @@ name: OKEmby Auto Checkin
 
 on:
   schedule:
-    - cron: '10 2 * * *'   # 北京时间 10:10
+    - cron: '30 16 * * *'  # 北京时间 00:30
   workflow_dispatch:
 
 jobs:
@@ -10,23 +10,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 拉取代码
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装 Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: 3.11
 
-      - name: 安装依赖
+      - name: Install Dependencies
         run: |
           pip install playwright requests
-          playwright install chromium
+          playwright install --with-deps chromium
 
-      - name: 运行签到
+      - name: Run Script
         env:
           OKEMBY_ACCOUNT: ${{ secrets.OKEMBY_ACCOUNT }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: |
-          python okemby_playwright.py
+        run: python okemby_action.py
