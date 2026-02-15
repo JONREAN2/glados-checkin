@@ -1,118 +1,93 @@
-import asyncio
 import os
-import random
 import requests
-from playwright.async_api import async_playwright
+import json
 
 BASE = "https://www.okemby.com"
 
 TG_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+ACCOUNTS = os.getenv("OKEMBY_ACCOUNT")  # 多账号格式: user1#pass1&user2#pass2
 
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": "okemby-api-checkin-bot"
+}
 
 def send_tg(msg):
     if not TG_TOKEN or not TG_CHAT_ID:
         print("⚠ 未配置 TG 通知")
         return
-
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    data = {
-        "chat_id": TG_CHAT_ID,
-        "text": msg
-    }
-
     try:
-        requests.post(url, data=data, timeout=20)
+        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": msg}, timeout=20)
     except Exception as e:
-        print("TG 发送失败:", e)
+        print("⚠ TG 发送失败:", e)
 
+def login(user, password):
+    url = f"{BASE}/api/auth/login"
+    payload = {
+        "userName": user,
+        "password": password,
+        "verificationToken": None
+    }
+    try:
+        r = requests.post(url, headers=HEADERS, json=payload, timeout=20)
+        data = r.json()
+        if r.status_code == 200 and "token" in data:
+            return data["token"]
+        else:
+            return None, data.get("message", "未知错误")
+    except Exception as e:
+        return None, str(e)
 
-async def run_account(username, password):
-    result = f"\n====== {username} ======\n"
+def checkin(token):
+    url = f"{BASE}/api/checkin"
+    headers = HEADERS.copy()
+    headers["Authorization"] = f"Bearer {token}"
+    try:
+        r = requests.post(url, headers=headers, timeout=20)
+        data = r.json()
+        if r.status_code == 200 and data.get("success"):
+            return True, data
+        else:
+            return False, data.get("message", "签到失败")
+    except Exception as e:
+        return False, str(e)
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
-
-        try:
-            print("🌐 访问首页 (等待CF验证)")
-            await page.goto(BASE, timeout=60000)
-            await page.wait_for_timeout(random.randint(4000, 7000))
-
-            print("🔐 打开登录页")
-            await page.goto(f"{BASE}/login")
-
-            # 等待用户名输入框出现（关键）
-            await page.wait_for_selector('input[name="userName"]', timeout=60000)
-
-            print("✍ 填写账号密码")
-            await page.fill('input[name="userName"]', username)
-            await page.fill('input[name="password"]', password)
-
-            print("🚀 点击登录")
-            try:
-                await page.click('button[type="submit"]')
-            except:
-                await page.locator("button").filter(has_text="登录").click()
-
-            await page.wait_for_timeout(random.randint(4000, 6000))
-
-            print("📊 进入 dashboard")
-            await page.goto(f"{BASE}/dashboard")
-            await page.wait_for_timeout(random.randint(4000, 6000))
-
-            content = await page.content()
-
-            if "已签到" in content:
-                print("✅ 今日已签到")
-                result += "✅ 今日已签到\n"
-            else:
-                print("🟡 尝试签到")
-                try:
-                    await page.locator("button").filter(has_text="签到").click()
-                    await page.wait_for_timeout(3000)
-                    print("✅ 签到成功")
-                    result += "✅ 签到成功\n"
-                except:
-                    print("⚠ 未找到签到按钮")
-                    result += "⚠ 未找到签到按钮\n"
-
-        except Exception as e:
-            print("❌ 异常:", e)
-            result += f"❌ 异常: {e}\n"
-            await page.screenshot(path=f"{username}_error.png")
-            print(f"📸 已保存截图 {username}_error.png")
-
-        await browser.close()
-
-    return result
-
-
-async def main():
-    accounts = os.getenv("OKEMBY_ACCOUNT")
-
-    if not accounts:
-        print("❌ 未设置 OKEMBY_ACCOUNT")
+def main():
+    if not ACCOUNTS:
+        print("❌ 未配置 OKEMBY_ACCOUNT")
         return
 
-    accounts = accounts.split("&")
-
-    final_msg = "📢 OKEmby 自动签到结果\n"
+    accounts = ACCOUNTS.split("&")
+    final_msg = "📢 OKEmby API 自动签到结果\n"
 
     for acc in accounts:
         try:
-            username, password = acc.split("#")
+            user, password = acc.split("#")
         except:
-            print("⚠ 账号格式错误:", acc)
+            final_msg += f"⚠ 账号格式错误: {acc}\n"
             continue
 
-        res = await run_account(username, password)
-        final_msg += res
+        final_msg += f"\n====== {user} ======\n"
+
+        token, err = login(user, password), None
+        if isinstance(token, tuple):
+            token, err = token
+        if not token:
+            final_msg += f"❌ 登录失败: {err}\n"
+            continue
+
+        success, res = checkin(token)
+        if success:
+            amount = res.get("amount", 0)
+            final_msg += f"✅ 签到成功，获得 {amount} RCoin\n"
+        else:
+            final_msg += f"❌ 签到失败: {res}\n"
 
     print(final_msg)
     send_tg(final_msg)
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
