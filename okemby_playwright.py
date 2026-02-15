@@ -10,6 +10,7 @@ TG_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
 def send_tg(msg):
+    """发送 Telegram 通知"""
     if not TG_TOKEN or not TG_CHAT_ID:
         print("⚠ 未配置TG通知")
         return
@@ -18,7 +19,10 @@ def send_tg(msg):
         "chat_id": TG_CHAT_ID,
         "text": msg
     }
-    requests.post(url, data=data)
+    try:
+        requests.post(url, data=data)
+    except Exception as e:
+        print("⚠ Telegram 发送失败:", e)
 
 async def run_account(username, password):
     result = f"\n====== {username} ======\n"
@@ -38,11 +42,11 @@ async def run_account(username, password):
             await page.fill('input[placeholder="用户名"]', username)
             await page.fill('input[placeholder="密码"]', password)
             await page.click("button:has-text('登录')")
-            await page.wait_for_timeout(5000)
+            await page.wait_for_timeout(random.randint(4000,6000))
 
-            print("📊 进入dashboard")
+            print("📊 进入 dashboard")
             await page.goto(f"{BASE}/dashboard")
-            await page.wait_for_timeout(5000)
+            await page.wait_for_timeout(random.randint(3000,5000))
 
             content = await page.content()
 
@@ -54,14 +58,17 @@ async def run_account(username, password):
                 try:
                     await page.click("button:has-text('签到')")
                     await page.wait_for_timeout(3000)
+                    print("✅ 签到完成")
                     result += "✅ 签到成功\n"
                 except:
+                    print("⚠ 未找到签到按钮")
                     result += "⚠ 未找到签到按钮\n"
 
         except Exception as e:
-            result += f"❌ 异常: {str(e)}\n"
+            print("❌ 异常:", e)
+            result += f"❌ 异常: {e}\n"
             await page.screenshot(path=f"{username}_error.png")
-            print("❌ 发生异常，已截图")
+            print(f"📸 已保存截图 {username}_error.png")
 
         await browser.close()
 
@@ -75,16 +82,19 @@ async def main():
         return
 
     accounts = accounts.split("&")
-
     final_msg = "📢 OKEmby 自动签到结果\n"
 
     for acc in accounts:
-        username, password = acc.split("#")
+        try:
+            username, password = acc.split("#")
+        except:
+            print(f"⚠ 账号格式错误: {acc}")
+            continue
         res = await run_account(username, password)
         final_msg += res
 
     print(final_msg)
     send_tg(final_msg)
 
-if name == "__main__":
+if __name__ == "__main__":
     asyncio.run(main())
