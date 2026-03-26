@@ -1,9 +1,9 @@
-name: Top5 Node Ping + Update CF DNS
+name: Dual Node Healthy Check + Zero-Downtime Update
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 每小时执行一次
-  workflow_dispatch: {}   # 支持手动触发
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
 
 jobs:
   update-dns:
@@ -14,91 +14,70 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y curl jq dnsutils
 
-      - name: Define nodes
+      - name: Define Environment
         run: |
-          # 定义所有节点（包含新增的指定节点）
-          NODES="emos.emby.bio emos-cn.078899.xyz embyos.92chigua.shop emos.255432.cc.cd emos.saga8.dpdns.org emos.137127.xyz a.aiaa.top/emos emos.tpuqc.dpdns.org pro.111196123.xyz proxy.2019102.xyz/emos clun.top emos.030666.xyz emos.12321.us.ci emby.fuk.indevs.in/xyz dx.dirige.de5.net newemos.mt6688999.dpdns.org emos.jeanne.dpdns.org emos.biu.gv.uy emos6.dolby.dpdns.org emos.200038.xyz a.myreverse.cc.cd/em media.emos.club emosbest.indevs.in emos.ujmb.dpdns.org:2053 yd.dirige.de5.net emos.cnmbyd.xyz emos.dirige.de5.net emos.yang1025.dpdns.org emos.liuer.indevs.in emos.wangjunqiang.indevs.in emos.030518.xyz emos.767873.xyz emos.dolby.dpdns.org emos.goldenarch.qzz.io"
+          # 仅保留指定的两个节点
+          NODES="emos.dirige.de5.net clun.top"
           echo "NODES=$NODES" >> $GITHUB_ENV
           echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
           echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
           echo "CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}" >> $GITHUB_ENV
 
-      - name: Ping nodes and resolve top5 IPs
-        id: process
+      - name: Healthy Ping and Resolve
         run: |
-          declare -A node_ping
-          # 1. 拨测逻辑
-          for NODE in $NODES; do
-            # 清洗域名：去掉 http(s)://, 路径 /... 和 端口 :...
-            CLEAN_DOMAIN=$(echo $NODE | sed -e 's/https\?:\/\///' -e 's/\/.*//' -e 's/:.*//')
-            
-            MIN=9999
-            SUCCESS=false
-            for i in 1 2 3; do
-              START=$(date +%s%3N)
-              # 使用清洗后的域名进行探测
-              if curl -o /dev/null -s -m 3 "https://$CLEAN_DOMAIN"; then
-                END=$(date +%s%3N)
-                TIME=$((END-START))
-                (( TIME < MIN )) && MIN=$TIME
-                SUCCESS=true
-              fi
-            done
-            
-            if [ "$SUCCESS" = true ]; then
-              node_ping["$CLEAN_DOMAIN"]=$MIN
-            fi
-          done
-
-          # 2. 排序并取前5个域名
-          TOP5_DOMAINS=$(for k in "${!node_ping[@]}"; do echo "${node_ping[$k]} ${k}"; done | sort -n | head -5 | awk '{print $2}')
-          
-          if [ -z "$TOP5_DOMAINS" ]; then
-            echo "错误：未发现可用节点，停止更新以保护 DNS 记录。"
-            exit 1
-          fi
-
-          # 3. 解析 IP 并去重
           TOPIPS=()
-          for DOMAIN in $TOP5_DOMAINS; do
-            IP=$(dig +short "$DOMAIN" | grep -E '^[0-9.]+$' | head -n1)
-            if [[ ! -z "$IP" ]]; then
-              TOPIPS+=("$IP")
+          for NODE in $NODES; do
+            # 拨测：检查 HTTP 状态码（200 或 302 视为健康）
+            STATS=$(curl -o /dev/null -s -m 5 -w "%{http_code} %{time_total}" "https://$NODE" || echo "000 9.999")
+            CODE=$(echo $STATS | awk '{print $1}')
+            TIME=$(echo $STATS | awk '{print $2}')
+
+            if [[ "$CODE" == "200" || "$CODE" == "302" ]]; then
+              IP=$(dig +short "$NODE" | grep -E '^[0-9.]+$' | head -n1)
+              if [[ ! -z "$IP" ]]; then
+                # 记录格式：耗时 IP
+                RESULTS+="$TIME $IP"$'\n'
+                echo "节点 $NODE 健康 (Code: $CODE, Latency: ${TIME}s), IP: $IP"
+              fi
+            else
+              echo "节点 $NODE 异常 (Code: $CODE)，跳过。"
             fi
           done
 
-          # 去重
-          UNIQUE_IPS=$(echo "${TOPIPS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')
-          
-          if [ -z "$UNIQUE_IPS" ]; then
-            echo "错误：无法解析到任何有效 IP。"
+          # 按延迟排序并提取 IP（最多取 2 个）
+          FINAL_IPS=$(echo "$RESULTS" | sort -n | awk '{print $2}' | uniq | head -2 | tr '\n' ' ')
+
+          if [ -z "$FINAL_IPS" ]; then
+            echo "错误：指定的两个节点均不可用，取消更新以保护解析。"
             exit 1
           fi
 
-          echo "TOPIPS=$UNIQUE_IPS" >> $GITHUB_ENV
-          echo "最终选定的优质 IP: $UNIQUE_IPS"
+          echo "TOPIPS=$FINAL_IPS" >> $GITHUB_ENV
+          echo "最终选定的健康 IP: $FINAL_IPS"
 
-      - name: Update Cloudflare DNS
+      - name: Zero-Downtime Update Cloudflare
         run: |
-          # 获取当前现有的所有 A 记录 ID
-          EXISTING_IDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
+          # 1. 获取现有记录 ID
+          OLD_IDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" | jq -r '.result[].id')
 
-          # 只有在获取到新 IP 的情况下才执行删除，防止空解析
-          if [ ! -z "$TOPIPS" ]; then
-            for ID in $EXISTING_IDS; do
+          # 2. 先添加新 IP（零停机切换）
+          for IP in $TOPIPS; do
+            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
+            echo "已成功指向新 IP: $IP"
+          done
+
+          # 3. 删除旧记录
+          if [ ! -z "$OLD_IDS" ]; then
+            for ID in $OLD_IDS; do
               curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
                 -H "Authorization: Bearer $CF_API_TOKEN" \
                 -H "Content-Type: application/json"
-              echo "已删除旧记录 ID: $ID"
-            done
-
-            for IP in $TOPIPS; do
-              curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
-                -H "Authorization: Bearer $CF_API_TOKEN" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
-              echo "已添加新记录: $CF_RECORD_NAME -> $IP"
+              echo "已清理旧记录 ID: $ID"
             done
           fi
+          echo "更新完成。"
