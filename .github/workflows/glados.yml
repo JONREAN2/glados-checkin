@@ -1,111 +1,78 @@
-name: Update Top5 CF DNS
+name: Top5 Node Ping + Update CF DNS
+
 on:
   schedule:
     - cron: '0 * * * *'  # 每小时执行一次
-  workflow_dispatch:
+  workflow_dispatch: {}   # 支持手动触发
 
 jobs:
   update-dns:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y iputils-ping curl jq dnsutils bc
+        run: sudo apt-get update && sudo apt-get install -y curl jq dnsutils
 
-      - name: Define domains
+      - name: Define nodes
         run: |
-          DOMAINS=(
-            "emos.emby.bio"
-            "emos-cn.078899.xyz"
-            "embyos.92chigua.shop"
-            "emos.255432.cc.cd"
-            "emos.saga8.dpdns.org"
-            "emos.137127.xyz"
-            "a.aiaa.top"
-            "emos.tpuqc.dpdns.org"
-            "pro.111196123.xyz"
-            "proxy.2019102.xyz"
-            "clun.top"
-            "emos.030666.xyz"
-            "emos.12321.us.ci"
-            "emby.fuk.indevs.in"
-            "dx.dirige.de5.net"
-            "newemos.mt6688999.dpdns.org"
-            "emos.jeanne.dpdns.org"
-            "emos.biu.gv.uy"
-            "emos6.dolby.dpdns.org"
-            "emos.200038.xyz"
-            "a.myreverse.cc.cd"
-            "media.emos.club"
-            "emosbest.indevs.in"
-            "emos.ujmb.dpdns.org"
-            "yd.dirige.de5.net"
-            "emos.cnmbyd.xyz"
-            "emos.dirige.de5.net"
-            "🦌.cc.cd"
-            "emos.mt6688999.dpdns.org"
-            "lt.dirige.de5.net"
-            "emos.660990.xyz"
-            "emos.yang1025.dpdns.org"
-            "emos.liuer.indevs.in"
-            "emos.wangjunqiang.indevs.in"
-            "emos.030518.xyz"
-            "emos.767873.xyz"
-            "emos.dolby.dpdns.org"
-            "emos.goldenarch.qzz.io"
-          )
-          echo "DOMAINS=${DOMAINS[@]}" >> $GITHUB_ENV
+          echo "NODES='emos.emby.bio emos-cn.078899.xyz embyos.92chigua.shop emos.255432.cc.cd emos.saga8.dpdns.org emos.137127.xyz a.aiaa.top/emos emos.tpuqc.dpdns.org pro.111196123.xyz proxy.2019102.xyz/emos clun.top emos.030666.xyz emos.12321.us.ci emby.fuk.indevs.in/xyz dx.dirige.de5.net newemos.mt6688999.dpdns.org emos.jeanne.dpdns.org emos.biu.gv.uy emos6.dolby.dpdns.org emos.200038.xyz a.myreverse.cc.cd/em media.emos.club emosbest.indevs.in emos.ujmb.dpdns.org:2053 yd.dirige.de5.net emos.cnmbyd.xyz emos.dirige.de5.net emos.yang1025.dpdns.org emos.liuer.indevs.in emos.wangjunqiang.indevs.in emos.030518.xyz emos.767873.xyz emos.dolby.dpdns.org emos.goldenarch.qzz.io'" >> $GITHUB_ENV
+          echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
+          echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
+          echo "CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}" >> $GITHUB_ENV
 
-      - name: Ping domains 3x and get top 5
+      - name: Ping nodes 3x and get top5
         id: ping
         run: |
-          declare -A LATENCY
-          for domain in ${DOMAINS[@]}; do
-            min_ping=9999
-            for i in {1..3}; do
-              ping_ms=$(ping -c 1 -W 2 $domain | tail -1 | awk -F '/' '{print $5}')
-              if [ -n "$ping_ms" ] && (( $(echo "$ping_ms < $min_ping" | bc -l) )); then
-                min_ping=$ping_ms
-              fi
+          declare -A node_ping
+          for NODE in $NODES; do
+            MIN=9999
+            for i in 1 2 3; do
+              START=$(date +%s%3N)
+              curl -o /dev/null -s -m 3 https://$NODE || continue
+              END=$(date +%s%3N)
+              TIME=$((END-START))
+              (( TIME < MIN )) && MIN=$TIME
             done
-            LATENCY[$domain]=$min_ping
+            node_ping[$NODE]=$MIN
+          done
+          # 排序 top5
+          TOP5=$(for k in "${!node_ping[@]}"; do echo "${node_ping[$k]} ${k}"; done | sort -n | head -5 | awk '{print $2}')
+          echo "TOP5=$TOP5" >> $GITHUB_ENV
+          echo "Top5 nodes: $TOP5"
+
+      - name: Resolve top5 IPs
+        id: resolve
+        run: |
+          TOPIPS=()
+          for NODE in $TOP5; do
+            IP=$(dig +short $NODE | head -n1)
+            if [[ ! -z "$IP" ]]; then
+              TOPIPS+=("$IP")
+              echo "Found IP for $NODE: $IP"
+            fi
+          done
+          echo "TOPIPS=${TOPIPS[*]}" >> $GITHUB_ENV
+
+      - name: Replace CF DNS with top5 IPs
+        run: |
+          # 删除旧的 A 记录
+          EXISTING_IDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" | jq -r '.result[].id')
+
+          for ID in $EXISTING_IDS; do
+            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json"
+            echo "Deleted old record ID: $ID"
           done
 
-          TOP5=$(for k in "${!LATENCY[@]}"; do echo "${LATENCY[$k]} $k"; done | sort -n | head -5 | awk '{print $2}')
-          echo "TOP5=$TOP5" >> $GITHUB_ENV
-          echo "Top 5 fastest domains: $TOP5"
-
-      - name: Update Cloudflare DNS
-        env:
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
-          CF_RECORD_NAME: cfemby
-        run: |
-          for domain in $TOP5; do
-            IP=$(dig +short $domain | head -1)
-            if [ -n "$IP" ]; then
-              echo "Updating $CF_RECORD_NAME -> $IP"
-              # 查找已有记录
-              RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME&content=$IP" \
-                -H "Authorization: Bearer $CF_API_TOKEN" \
-                -H "Content-Type: application/json" | jq -r '.result[0].id')
-
-              if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" = "null" ]; then
-                # 创建新记录
-                curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
-                  -H "Authorization: Bearer $CF_API_TOKEN" \
-                  -H "Content-Type: application/json" \
-                  --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
-              else
-                # 更新现有记录
-                curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
-                  -H "Authorization: Bearer $CF_API_TOKEN" \
-                  -H "Content-Type: application/json" \
-                  --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
-              fi
-            fi
+          # 添加新的 top5 IP 记录
+          for IP in $TOPIPS; do
+            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
+            echo "Added new A record: $CF_RECORD_NAME -> $IP"
           done
