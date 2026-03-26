@@ -16,63 +16,89 @@ jobs:
 
       - name: Define nodes
         run: |
-          echo "NODES='emos.emby.bio emos-cn.078899.xyz embyos.92chigua.shop emos.255432.cc.cd emos.saga8.dpdns.org emos.137127.xyz a.aiaa.top/emos emos.tpuqc.dpdns.org pro.111196123.xyz proxy.2019102.xyz/emos clun.top emos.030666.xyz emos.12321.us.ci emby.fuk.indevs.in/xyz dx.dirige.de5.net newemos.mt6688999.dpdns.org emos.jeanne.dpdns.org emos.biu.gv.uy emos6.dolby.dpdns.org emos.200038.xyz a.myreverse.cc.cd/em media.emos.club emosbest.indevs.in emos.ujmb.dpdns.org:2053 yd.dirige.de5.net emos.cnmbyd.xyz emos.dirige.de5.net emos.yang1025.dpdns.org emos.liuer.indevs.in emos.wangjunqiang.indevs.in emos.030518.xyz emos.767873.xyz emos.dolby.dpdns.org emos.goldenarch.qzz.io'" >> $GITHUB_ENV
+          # 定义所有节点（包含新增的指定节点）
+          NODES="emos.emby.bio emos-cn.078899.xyz embyos.92chigua.shop emos.255432.cc.cd emos.saga8.dpdns.org emos.137127.xyz a.aiaa.top/emos emos.tpuqc.dpdns.org pro.111196123.xyz proxy.2019102.xyz/emos clun.top emos.030666.xyz emos.12321.us.ci emby.fuk.indevs.in/xyz dx.dirige.de5.net newemos.mt6688999.dpdns.org emos.jeanne.dpdns.org emos.biu.gv.uy emos6.dolby.dpdns.org emos.200038.xyz a.myreverse.cc.cd/em media.emos.club emosbest.indevs.in emos.ujmb.dpdns.org:2053 yd.dirige.de5.net emos.cnmbyd.xyz emos.dirige.de5.net emos.yang1025.dpdns.org emos.liuer.indevs.in emos.wangjunqiang.indevs.in emos.030518.xyz emos.767873.xyz emos.dolby.dpdns.org emos.goldenarch.qzz.io"
+          echo "NODES=$NODES" >> $GITHUB_ENV
           echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
           echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
           echo "CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}" >> $GITHUB_ENV
 
-      - name: Ping nodes 3x and get top5
-        id: ping
+      - name: Ping nodes and resolve top5 IPs
+        id: process
         run: |
           declare -A node_ping
+          # 1. 拨测逻辑
           for NODE in $NODES; do
+            # 清洗域名：去掉 http(s)://, 路径 /... 和 端口 :...
+            CLEAN_DOMAIN=$(echo $NODE | sed -e 's/https\?:\/\///' -e 's/\/.*//' -e 's/:.*//')
+            
             MIN=9999
+            SUCCESS=false
             for i in 1 2 3; do
               START=$(date +%s%3N)
-              curl -o /dev/null -s -m 3 https://$NODE || continue
-              END=$(date +%s%3N)
-              TIME=$((END-START))
-              (( TIME < MIN )) && MIN=$TIME
+              # 使用清洗后的域名进行探测
+              if curl -o /dev/null -s -m 3 "https://$CLEAN_DOMAIN"; then
+                END=$(date +%s%3N)
+                TIME=$((END-START))
+                (( TIME < MIN )) && MIN=$TIME
+                SUCCESS=true
+              fi
             done
-            node_ping[$NODE]=$MIN
-          done
-          # 排序 top5
-          TOP5=$(for k in "${!node_ping[@]}"; do echo "${node_ping[$k]} ${k}"; done | sort -n | head -5 | awk '{print $2}')
-          echo "TOP5=$TOP5" >> $GITHUB_ENV
-          echo "Top5 nodes: $TOP5"
-
-      - name: Resolve top5 IPs
-        id: resolve
-        run: |
-          TOPIPS=()
-          for NODE in $TOP5; do
-            IP=$(dig +short $NODE | head -n1)
-            if [[ ! -z "$IP" ]]; then
-              TOPIPS+=("$IP")
-              echo "Found IP for $NODE: $IP"
+            
+            if [ "$SUCCESS" = true ]; then
+              node_ping["$CLEAN_DOMAIN"]=$MIN
             fi
           done
-          echo "TOPIPS=${TOPIPS[*]}" >> $GITHUB_ENV
 
-      - name: Replace CF DNS with top5 IPs
+          # 2. 排序并取前5个域名
+          TOP5_DOMAINS=$(for k in "${!node_ping[@]}"; do echo "${node_ping[$k]} ${k}"; done | sort -n | head -5 | awk '{print $2}')
+          
+          if [ -z "$TOP5_DOMAINS" ]; then
+            echo "错误：未发现可用节点，停止更新以保护 DNS 记录。"
+            exit 1
+          fi
+
+          # 3. 解析 IP 并去重
+          TOPIPS=()
+          for DOMAIN in $TOP5_DOMAINS; do
+            IP=$(dig +short "$DOMAIN" | grep -E '^[0-9.]+$' | head -n1)
+            if [[ ! -z "$IP" ]]; then
+              TOPIPS+=("$IP")
+            fi
+          done
+
+          # 去重
+          UNIQUE_IPS=$(echo "${TOPIPS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+          
+          if [ -z "$UNIQUE_IPS" ]; then
+            echo "错误：无法解析到任何有效 IP。"
+            exit 1
+          fi
+
+          echo "TOPIPS=$UNIQUE_IPS" >> $GITHUB_ENV
+          echo "最终选定的优质 IP: $UNIQUE_IPS"
+
+      - name: Update Cloudflare DNS
         run: |
-          # 删除旧的 A 记录
+          # 获取当前现有的所有 A 记录 ID
           EXISTING_IDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" | jq -r '.result[].id')
 
-          for ID in $EXISTING_IDS; do
-            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
-              -H "Authorization: Bearer $CF_API_TOKEN" \
-              -H "Content-Type: application/json"
-            echo "Deleted old record ID: $ID"
-          done
+          # 只有在获取到新 IP 的情况下才执行删除，防止空解析
+          if [ ! -z "$TOPIPS" ]; then
+            for ID in $EXISTING_IDS; do
+              curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+                -H "Content-Type: application/json"
+              echo "已删除旧记录 ID: $ID"
+            done
 
-          # 添加新的 top5 IP 记录
-          for IP in $TOPIPS; do
-            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
-              -H "Authorization: Bearer $CF_API_TOKEN" \
-              -H "Content-Type: application/json" \
-              --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
-            echo "Added new A record: $CF_RECORD_NAME -> $IP"
-          done
+            for IP in $TOPIPS; do
+              curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
+              echo "已添加新记录: $CF_RECORD_NAME -> $IP"
+            done
+          fi
