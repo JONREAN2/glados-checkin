@@ -1,37 +1,109 @@
-name: GLaDOS Multi-Account Checkin
+name: Emby Optimizer
 
 on:
   schedule:
-    - cron: "0 16 * * *"   # 北京时间 00:00（UTC+8）
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 jobs:
-  checkin:
+  speed:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Install dependencies
-        run: |
-          pip install requests
-
-      - name: Run GLaDOS Checkin
+      - name: Run Speed Test
         env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          API: ${{ secrets.API }}
+        run: |
 
-          GLADOS_EMAIL_1: ${{ secrets.GLADOS_EMAIL_1 }}
-          GLADOS_COOKIE_1: ${{ secrets.GLADOS_COOKIE_1 }}
+          nodes=(
+          emos.emby.bio
+          emos-cn.078899.xyz
+          embyos.92chigua.shop
+          emos.255432.cc.cd
+          emos.saga8.dpdns.org
+          emos.137127.xyz
+          a.aiaa.top
+          emos.tpuqc.dpdns.org
+          pro.111196123.xyz
+          proxy.2019102.xyz
+          clun.top
+          emos.030666.xyz
+          emos.12321.us.ci
+          emby.fuk.indevs.in
+          dx.dirige.de5.net
+          newemos.mt6688999.dpdns.org
+          emos.jeanne.dpdns.org
+          emos.biu.gv.uy
+          emos6.dolby.dpdns.org
+          emos.200038.xyz
+          a.myreverse.cc.cd
+          media.emos.club
+          emosbest.indevs.in
+          emos.ujmb.dpdns.org
+          yd.dirige.de5.net
+          emos.cnmbyd.xyz
+          emos.dirige.de5.net
+          emos.mt6688999.dpdns.org
+          lt.dirige.de5.net
+          emos.660990.xyz
+          emos.yang1025.dpdns.org
+          emos.liuer.indevs.in
+          emos.wangjunqiang.indevs.in
+          emos.030518.xyz
+          emos.767873.xyz
+          emos.dolby.dpdns.org
+          emos.goldenarch.qzz.io
+          )
 
-          GLADOS_EMAIL_2: ${{ secrets.GLADOS_EMAIL_2 }}
-          GLADOS_COOKIE_2: ${{ secrets.GLADOS_COOKIE_2 }}
+          result=""
 
-          # 想加第3、4个账号，继续往下写即可
-        run: python glados.py
+          for node in "${nodes[@]}"; do
+
+            best=9999
+            success=0
+
+            for i in 1 2 3; do
+              start=$(date +%s%3N)
+
+              curl -o /dev/null -s -m 3 https://$node/System/Info/Public
+              code=$?
+
+              end=$(date +%s%3N)
+              delay=$((end-start))
+
+              if [ $code -eq 0 ]; then
+                success=$((success+1))
+                if [ $delay -lt $best ]; then
+                  best=$delay
+                fi
+              fi
+            done
+
+            echo "$node $best (ok=$success)"
+
+            if [ $success -ge 2 ] && [ $best -lt 2000 ]; then
+              result="$result$node $best\n"
+            fi
+
+          done
+
+          echo -e "$result" | sort -k2 -n | head -5 > top.txt
+
+          top1=$(sed -n '1p' top.txt | awk '{print $1}')
+          top2=$(sed -n '2p' top.txt | awk '{print $1}')
+          top3=$(sed -n '3p' top.txt | awk '{print $1}')
+          top4=$(sed -n '4p' top.txt | awk '{print $1}')
+          top5=$(sed -n '5p' top.txt | awk '{print $1}')
+
+          echo "TOP: $top1 $top2 $top3 $top4 $top5"
+
+          curl -X POST $API \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"colo\":\"DEFAULT\",
+              \"top1\":\"$top1\",
+              \"top2\":\"$top2\",
+              \"top3\":\"$top3\",
+              \"top4\":\"$top4\",
+              \"top5\":\"$top5\"
+            }"
