@@ -1,109 +1,78 @@
-name: Emby Optimizer
+name: Top5 Node Ping + Update CF DNS
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
-  workflow_dispatch:
+    - cron: '0 * * * *'  # 每小时执行一次
+  workflow_dispatch: {}   # 支持手动触发
 
 jobs:
-  speed:
+  update-dns:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Run Speed Test
-        env:
-          API: ${{ secrets.API }}
+      - uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y curl jq dnsutils
+
+      - name: Define nodes
         run: |
+          echo "NODES='emos.emby.bio emos-cn.078899.xyz embyos.92chigua.shop emos.255432.cc.cd emos.saga8.dpdns.org emos.137127.xyz a.aiaa.top/emos emos.tpuqc.dpdns.org pro.111196123.xyz proxy.2019102.xyz/emos clun.top emos.030666.xyz emos.12321.us.ci emby.fuk.indevs.in/xyz dx.dirige.de5.net newemos.mt6688999.dpdns.org emos.jeanne.dpdns.org emos.biu.gv.uy emos6.dolby.dpdns.org emos.200038.xyz a.myreverse.cc.cd/em media.emos.club emosbest.indevs.in emos.ujmb.dpdns.org:2053 yd.dirige.de5.net emos.cnmbyd.xyz emos.dirige.de5.net emos.yang1025.dpdns.org emos.liuer.indevs.in emos.wangjunqiang.indevs.in emos.030518.xyz emos.767873.xyz emos.dolby.dpdns.org emos.goldenarch.qzz.io'" >> $GITHUB_ENV
+          echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
+          echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
+          echo "CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}" >> $GITHUB_ENV
 
-          nodes=(
-          emos.emby.bio
-          emos-cn.078899.xyz
-          embyos.92chigua.shop
-          emos.255432.cc.cd
-          emos.saga8.dpdns.org
-          emos.137127.xyz
-          a.aiaa.top
-          emos.tpuqc.dpdns.org
-          pro.111196123.xyz
-          proxy.2019102.xyz
-          clun.top
-          emos.030666.xyz
-          emos.12321.us.ci
-          emby.fuk.indevs.in
-          dx.dirige.de5.net
-          newemos.mt6688999.dpdns.org
-          emos.jeanne.dpdns.org
-          emos.biu.gv.uy
-          emos6.dolby.dpdns.org
-          emos.200038.xyz
-          a.myreverse.cc.cd
-          media.emos.club
-          emosbest.indevs.in
-          emos.ujmb.dpdns.org
-          yd.dirige.de5.net
-          emos.cnmbyd.xyz
-          emos.dirige.de5.net
-          emos.mt6688999.dpdns.org
-          lt.dirige.de5.net
-          emos.660990.xyz
-          emos.yang1025.dpdns.org
-          emos.liuer.indevs.in
-          emos.wangjunqiang.indevs.in
-          emos.030518.xyz
-          emos.767873.xyz
-          emos.dolby.dpdns.org
-          emos.goldenarch.qzz.io
-          )
-
-          result=""
-
-          for node in "${nodes[@]}"; do
-
-            best=9999
-            success=0
-
+      - name: Ping nodes 3x and get top5
+        id: ping
+        run: |
+          declare -A node_ping
+          for NODE in $NODES; do
+            MIN=9999
             for i in 1 2 3; do
-              start=$(date +%s%3N)
-
-              curl -o /dev/null -s -m 3 https://$node/System/Info/Public
-              code=$?
-
-              end=$(date +%s%3N)
-              delay=$((end-start))
-
-              if [ $code -eq 0 ]; then
-                success=$((success+1))
-                if [ $delay -lt $best ]; then
-                  best=$delay
-                fi
-              fi
+              START=$(date +%s%3N)
+              curl -o /dev/null -s -m 3 https://$NODE || continue
+              END=$(date +%s%3N)
+              TIME=$((END-START))
+              (( TIME < MIN )) && MIN=$TIME
             done
+            node_ping[$NODE]=$MIN
+          done
+          # 排序 top5
+          TOP5=$(for k in "${!node_ping[@]}"; do echo "${node_ping[$k]} ${k}"; done | sort -n | head -5 | awk '{print $2}')
+          echo "TOP5=$TOP5" >> $GITHUB_ENV
+          echo "Top5 nodes: $TOP5"
 
-            echo "$node $best (ok=$success)"
-
-            if [ $success -ge 2 ] && [ $best -lt 2000 ]; then
-              result="$result$node $best\n"
+      - name: Resolve top5 IPs
+        id: resolve
+        run: |
+          TOPIPS=()
+          for NODE in $TOP5; do
+            IP=$(dig +short $NODE | head -n1)
+            if [[ ! -z "$IP" ]]; then
+              TOPIPS+=("$IP")
+              echo "Found IP for $NODE: $IP"
             fi
+          done
+          echo "TOPIPS=${TOPIPS[*]}" >> $GITHUB_ENV
 
+      - name: Replace CF DNS with top5 IPs
+        run: |
+          # 删除旧的 A 记录
+          EXISTING_IDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" | jq -r '.result[].id')
+
+          for ID in $EXISTING_IDS; do
+            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json"
+            echo "Deleted old record ID: $ID"
           done
 
-          echo -e "$result" | sort -k2 -n | head -5 > top.txt
-
-          top1=$(sed -n '1p' top.txt | awk '{print $1}')
-          top2=$(sed -n '2p' top.txt | awk '{print $1}')
-          top3=$(sed -n '3p' top.txt | awk '{print $1}')
-          top4=$(sed -n '4p' top.txt | awk '{print $1}')
-          top5=$(sed -n '5p' top.txt | awk '{print $1}')
-
-          echo "TOP: $top1 $top2 $top3 $top4 $top5"
-
-          curl -X POST $API \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"colo\":\"DEFAULT\",
-              \"top1\":\"$top1\",
-              \"top2\":\"$top2\",
-              \"top3\":\"$top3\",
-              \"top4\":\"$top4\",
-              \"top5\":\"$top5\"
-            }"
+          # 添加新的 top5 IP 记录
+          for IP in $TOPIPS; do
+            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
+            echo "Added new A record: $CF_RECORD_NAME -> $IP"
+          done
