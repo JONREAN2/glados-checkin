@@ -2,7 +2,7 @@ name: Dual Node Healthy Check + Zero-Downtime Update
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 */3 * * *'
   workflow_dispatch: {}
 
 jobs:
