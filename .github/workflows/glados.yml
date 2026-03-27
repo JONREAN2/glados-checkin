@@ -1,4 +1,4 @@
-name: Top1 Node (Final Logic Fix)
+name: Top1 Node (Dynamic IP Extraction + 5x Ping)
 
 on:
   schedule:
@@ -16,8 +16,18 @@ jobs:
 
       - name: Define Environment
         run: |
-          NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz 172.64.52.124" 
-          echo "NODES=$NODES" >> $GITHUB_ENV
+          # 1. 基础节点列表
+          BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz 172.64.52.124"
+          
+          # 2. 动态提取 ip.v2too.top 的前两个 IP
+          echo "正在从 ip.v2too.top 提取优选 IP..."
+          DYNAMIC_IPS=$(dig +short ip.v2too.top | grep -E '^[0-9.]+$' | head -n2 | xargs)
+          
+          # 3. 合并所有待测目标
+          ALL_NODES="$BASE_NODES $DYNAMIC_IPS"
+          
+          echo "最终测试目标列表: $ALL_NODES"
+          echo "NODES=$ALL_NODES" >> $GITHUB_ENV
           echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
           echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
           echo "CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}" >> $GITHUB_ENV
@@ -29,25 +39,23 @@ jobs:
             echo "------------------------------------------------"
             echo "正在对节点进行 5 次测速: $NODE ..."
             
-            # 记录该节点 5 次中最好的表现
             node_best="9.999"
-            
             for i in {1..5}; do
-              # 关键修复：完全隔离标准输出和错误输出，确保不会粘连
+              # 获取延迟，确保不粘连
               TIME_RAW=$(curl -o /dev/null -s -L -k -m 3 -w "%{time_total}\n" "https://$NODE" || echo "9.999")
-              # 强制只取第一行纯数字
               TIME=$(echo "$TIME_RAW" | grep -oE '[0-9.]+' | head -n1)
+              [[ -z "$TIME" ]] && TIME="9.999"
               
               echo "  第 $i 次测试延迟: ${TIME}s"
               
-              # 使用 awk 进行浮点数比较，比 bc 更稳健
+              # 使用 awk 比较浮点数
               is_better=$(awk -v t1="$TIME" -v t2="$node_best" 'BEGIN {print (t1 < t2)}')
               if [ "$is_better" -eq 1 ]; then
                 node_best=$TIME
               fi
             done
             
-            # IP 识别
+            # 识别 IP
             if [[ "$NODE" =~ ^[0-9.]+$ ]]; then
               IP=$NODE
             else
@@ -82,8 +90,8 @@ jobs:
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
           
-          # 修复点：使用更健壮的 jq 提取方式，防止 Index Error
-          RECORD_IDS=$(echo "$EXIST_DATA" | jq -r '.result | .[].id')
+          # 提取所有 ID
+          RECORD_IDS=$(echo "$EXIST_DATA" | jq -r '.result[]?.id // empty')
           FIRST_ID=$(echo "$RECORD_IDS" | head -n1)
 
           if [[ ! -z "$FIRST_ID" && "$FIRST_ID" != "null" ]]; then
@@ -103,13 +111,13 @@ jobs:
           if echo "$UPDATE_RES" | jq -e '.success' > /dev/null; then
             echo "✅ DNS 更新成功: $BEST_IP"
             
-            # 修复点：清理逻辑。排除掉我们刚更新的那个 FIRST_ID
+            # 清理其他同名但 ID 不同的记录，确保解析唯一性
             for ID in $RECORD_IDS; do
               if [[ "$ID" != "$FIRST_ID" && "$ID" != "null" ]]; then
                 curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
                   -H "Authorization: Bearer $CF_API_TOKEN" \
                   -H "Content-Type: application/json"
-                echo "🗑️ 清理多余记录: $ID"
+                echo "🗑️ 清理冗余记录: $ID"
               fi
             done
           else
