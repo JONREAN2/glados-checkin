@@ -1,9 +1,9 @@
-name: Dual Node Healthy Check + Zero-Downtime Update
+name: Node Latency Priority + Zero-Downtime Update
 
 on:
   schedule:
-    - cron: '0 */3 * * *'
-  workflow_dispatch: {}
+    - cron: '0 */3 * * *'  # 每3小时执行一次
+  workflow_dispatch: {}    # 支持手动触发
 
 jobs:
   update-dns:
@@ -16,68 +16,74 @@ jobs:
 
       - name: Define Environment
         run: |
-          # 仅保留指定的两个节点
+          # 待检测的三个节点
           NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc" 
           echo "NODES=$NODES" >> $GITHUB_ENV
           echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
           echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
           echo "CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}" >> $GITHUB_ENV
 
-      - name: Healthy Ping and Resolve
+      - name: Latency Ping and Resolve
         run: |
-          TOPIPS=()
+          RESULTS=""
           for NODE in $NODES; do
-            # 拨测：检查 HTTP 状态码（200 或 302 视为健康）
-            STATS=$(curl -o /dev/null -s -m 5 -w "%{http_code} %{time_total}" "https://$NODE" || echo "000 9.999")
-            CODE=$(echo $STATS | awk '{print $1}')
-            TIME=$(echo $STATS | awk '{print $2}')
-
-            if [[ "$CODE" == "200" || "$CODE" == "302" ]]; then
-              IP=$(dig +short "$NODE" | grep -E '^[0-9.]+$' | head -n1)
-              if [[ ! -z "$IP" ]]; then
-                # 记录格式：耗时 IP
-                RESULTS+="$TIME $IP"$'\n'
-                echo "节点 $NODE 健康 (Code: $CODE, Latency: ${TIME}s), IP: $IP"
-              fi
+            echo "正在检测节点延迟: $NODE ..."
+            # 获取总响应时间，-L 跟随重定向，-m 5 设置5秒超时
+            # 无论返回什么状态码（包括404），只要能连通就记录时间
+            TIME=$(curl -o /dev/null -s -L -m 5 -w "%{time_total}" "https://$NODE" || echo "9.999")
+            
+            # 解析该域名的当前 IP
+            IP=$(dig +short "$NODE" | grep -E '^[0-9.]+$' | head -n1)
+            
+            if [[ ! -z "$IP" && "$TIME" != "9.999" ]]; then
+              # 拼接格式：延迟(第一列) IP(第二列)
+              RESULTS="${RESULTS}${TIME} ${IP}"$'\n'
+              echo "节点 $NODE -> 延迟: ${TIME}s | IP: $IP"
             else
-              echo "节点 $NODE 异常 (Code: $CODE)，跳过。"
+              echo "节点 $NODE 无法连通或无法解析，跳过。"
             fi
           done
 
-          # 按延迟排序并提取 IP（最多取 2 个）
-          FINAL_IPS=$(echo "$RESULTS" | sort -n | awk '{print $2}' | uniq | head -2 | tr '\n' ' ')
+          # 核心排序逻辑：
+          # 1. sort -n 按数值从小到大排（延迟最低的在第一行）
+          # 2. uniq 去重（防止不同域名解析到同一个IP重复添加）
+          # 3. head -2 取延迟最低的两个 IP
+          FINAL_IPS=$(echo "$RESULTS" | sed '/^$/d' | sort -n | awk '{print $2}' | uniq | head -2 | tr '\n' ' ')
 
           if [ -z "$FINAL_IPS" ]; then
-            echo "错误：指定的两个节点均不可用，取消更新以保护解析。"
+            echo "错误：没有节点可以连通，为保护现有解析，停止更新。"
             exit 1
           fi
 
           echo "TOPIPS=$FINAL_IPS" >> $GITHUB_ENV
-          echo "最终选定的健康 IP: $FINAL_IPS"
+          echo "最终选定的优质 IP (第一位为最低延迟): $FINAL_IPS"
 
       - name: Zero-Downtime Update Cloudflare
         run: |
-          # 1. 获取现有记录 ID
+          # 1. 获取现有记录 ID（备份用于后续删除）
           OLD_IDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" | jq -r '.result[].id')
 
-          # 2. 先添加新 IP（零停机切换）
+          # 2. 先添加排序后的新 IP
+          # 按照 $TOPIPS 的顺序依次添加，Cloudflare 会根据添加顺序显示
           for IP in $TOPIPS; do
             curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
               -H "Authorization: Bearer $CF_API_TOKEN" \
               -H "Content-Type: application/json" \
               --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
-            echo "已成功指向新 IP: $IP"
+            echo "已成功添加 A 记录: $IP"
           done
 
-          # 3. 删除旧记录
+          # 3. 安全删除旧记录
           if [ ! -z "$OLD_IDS" ]; then
-            for ID in $OLD_IDS; do
-              curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
-                -H "Authorization: Bearer $CF_API_TOKEN" \
-                -H "Content-Type: application/json"
-              echo "已清理旧记录 ID: $ID"
+            for ID in $OLD_IDS | tr ' ' '\n'; do
+              if [ "$ID" != "null" ]; then
+                curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
+                  -H "Authorization: Bearer $CF_API_TOKEN" \
+                  -H "Content-Type: application/json"
+                echo "已清理旧记录 ID: $ID"
+              fi
             done
           fi
-          echo "更新完成。"
+          echo "所有操作已完成，解析已更新至最优节点。"
