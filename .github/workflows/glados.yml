@@ -1,8 +1,8 @@
-name: Top1 Node (API Dynamic Extraction + 5x Ping)
+name: Top1 Node (Direct API Extraction - No Ping)
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 * * * *'  # 每小时执行
   workflow_dispatch: {}
 
 jobs:
@@ -12,105 +12,55 @@ jobs:
       - uses: actions/checkout@v3
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y curl jq dnsutils
+        run: sudo apt-get update && sudo apt-get install -y curl jq
 
-      - name: Define Environment
+      - name: Extract IPs from API
         run: |
-          # 1. 基础固定节点列表
-          BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz 172.64.52.124"
-          
-          # 2. 从 API 动态提取延迟最低的前 2 个 IP
           echo "正在从 API 获取最新优选节点..."
-          # 逻辑：获取 JSON -> 过滤出 A 记录/IP -> 按 latency 数值升序排序 -> 取前两个 IP
-          API_DATA=$(curl -s -m 10 "https://ip.v2too.top/api/nodes")
+          # 获取 JSON 数据
+          API_RES=$(curl -s -m 10 "https://ip.v2too.top/api/nodes")
           
-          if [ ! -z "$API_DATA" ]; then
-            DYNAMIC_IPS=$(echo "$API_DATA" | jq -r 'sort_by(.latency) | .[:2] | .[].ip' | xargs)
-            echo "API 提取出的最优 2 个 IP: $DYNAMIC_IPS"
-          else
-            echo "警告：无法访问 API，将仅使用基础节点。"
-            DYNAMIC_IPS=""
+          # 关键修复：路径增加 .data，并确保 latency 转为数值进行排序
+          # 1. 提取 .data 数组
+          # 2. 按 latency 转为数字后升序排序
+          # 3. 取前两个的 .ip
+          DYNAMIC_IPS=$(echo "$API_RES" | jq -r '.data | sort_by(.latency | tonumber) | .[:2] | .[].ip' | xargs)
+
+          if [ -z "$DYNAMIC_IPS" ] || [ "$DYNAMIC_IPS" == "null" ]; then
+            echo "错误：未能从 API 提取到 IP，请检查接口返回格式。"
+            exit 1
           fi
+
+          # 选第一个作为 BEST_IP (或按你之前的需求，如果只想更新一个记录)
+          # 如果你想在 CF 里存两个 IP，逻辑会稍有不同，这里默认取最快的那个更新单条记录
+          BEST_IP=$(echo "$DYNAMIC_IPS" | awk '{print $1}')
+
+          echo "API 提取出的最优两个 IP: $DYNAMIC_IPS"
+          echo "最终选定更新 IP: $BEST_IP"
           
-          # 3. 合并所有待测目标
-          ALL_NODES="$BASE_NODES $DYNAMIC_IPS"
-          
-          echo "最终汇总测试目标: $ALL_NODES"
-          echo "NODES=$ALL_NODES" >> $GITHUB_ENV
+          echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
           echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
           echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
           echo "CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}" >> $GITHUB_ENV
 
-      - name: Latency Ping (5 Times) and Resolve
-        run: |
-          RESULTS=""
-          for NODE in $NODES; do
-            echo "------------------------------------------------"
-            echo "正在对节点进行 5 次实地测速: $NODE ..."
-            
-            node_best="9.999"
-            for i in {1..5}; do
-              # 隔离输出，防止粘连
-              TIME_RAW=$(curl -o /dev/null -s -L -k -m 3 -w "%{time_total}\n" "https://$NODE" || echo "9.999")
-              TIME=$(echo "$TIME_RAW" | grep -oE '[0-9.]+' | head -n1)
-              [[ -z "$TIME" ]] && TIME="9.999"
-              
-              echo "  测试 $i: ${TIME}s"
-              
-              # 浮点数比较逻辑 (使用 awk 避开 bc 报错)
-              is_better=$(awk -v t1="$TIME" -v t2="$node_best" 'BEGIN {print (t1 < t2)}')
-              if [ "$is_better" -eq 1 ]; then
-                node_best=$TIME
-              fi
-            done
-            
-            # 识别 IP
-            if [[ "$NODE" =~ ^[0-9.]+$ ]]; then
-              IP=$NODE
-            else
-              IP=$(dig +short "$NODE" | grep -E '^[0-9.]+$' | head -n1)
-            fi
-            
-            if [[ ! -z "$IP" && "$node_best" != "9.999" ]]; then
-              RESULTS="${RESULTS}${node_best} ${IP}"$'\n'
-              echo ">> 节点 $NODE 实测最优: ${node_best}s | IP: $IP"
-            fi
-          done
-
-          echo "------------------------------------------------"
-          echo "--- 最终延迟对账单 (实测排序) ---"
-          SORTED_RESULTS=$(echo "$RESULTS" | sed '/^$/d' | sort -n)
-          echo "$SORTED_RESULTS"
-          
-          BEST_IP=$(echo "$SORTED_RESULTS" | head -n1 | awk '{print $2}')
-
-          if [ -z "$BEST_IP" ]; then
-            echo "错误：未找到任何可用节点。"
-            exit 1
-          fi
-
-          echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
-          echo "🏆 全局实测冠军: $BEST_IP"
-
-      - name: Update Cloudflare DNS (Safe Mode)
+      - name: Update Cloudflare DNS (Safe PUT Mode)
         run: |
           # 1. 获取现有记录
           EXIST_DATA=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
           
-          # 提取记录 ID 列表
           RECORD_IDS=$(echo "$EXIST_DATA" | jq -r '.result[]?.id // empty')
           FIRST_ID=$(echo "$RECORD_IDS" | head -n1)
 
           if [[ ! -z "$FIRST_ID" && "$FIRST_ID" != "null" ]]; then
-            echo "更新现有记录: $FIRST_ID"
+            echo "执行覆盖更新 (PUT): $FIRST_ID"
             UPDATE_RES=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$FIRST_ID" \
               -H "Authorization: Bearer $CF_API_TOKEN" \
               -H "Content-Type: application/json" \
               --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$BEST_IP\",\"ttl\":1,\"proxied\":false}")
           else
-            echo "创建新记录..."
+            echo "执行新增 (POST)..."
             UPDATE_RES=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
               -H "Authorization: Bearer $CF_API_TOKEN" \
               -H "Content-Type: application/json" \
@@ -119,14 +69,11 @@ jobs:
 
           if echo "$UPDATE_RES" | jq -e '.success' > /dev/null; then
             echo "✅ DNS 更新成功: $BEST_IP"
-            
-            # 清理冗余重复记录 (排除当前更新成功的 ID)
+            # 清理冗余
             for ID in $RECORD_IDS; do
-              if [[ "$ID" != "$FIRST_ID" && "$ID" != "null" ]]; then
+              if [[ "$ID" != "$FIRST_ID" ]]; then
                 curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
-                  -H "Authorization: Bearer $CF_API_TOKEN" \
-                  -H "Content-Type: application/json"
-                echo "🗑️ 清理重复记录 ID: $ID"
+                  -H "Authorization: Bearer $CF_API_TOKEN"
               fi
             done
           else
