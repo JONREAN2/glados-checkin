@@ -1,4 +1,4 @@
-name: Node Latency Priority + Zero-Downtime Update
+name: Top1 Node (5x Ping) + Zero-Downtime Update
 
 on:
   schedule:
@@ -23,67 +23,69 @@ jobs:
           echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
           echo "CF_RECORD_NAME=${{ secrets.CF_RECORD_NAME }}" >> $GITHUB_ENV
 
-      - name: Latency Ping and Resolve
+      - name: Latency Ping (5 Times) and Resolve
         run: |
           RESULTS=""
           for NODE in $NODES; do
-            echo "正在检测节点延迟: $NODE ..."
-            # 获取总响应时间，-L 跟随重定向，-m 5 设置5秒超时
-            # 无论返回什么状态码（包括404），只要能连通就记录时间
-            TIME=$(curl -o /dev/null -s -L -m 5 -w "%{time_total}" "https://$NODE" || echo "9.999")
+            echo "正在对节点进行 5 次测速: $NODE ..."
             
-            # 解析该域名的当前 IP
+            MIN_TIME=9.999
+            # 内部循环 5 次，取最小值
+            for i in {1..5}; do
+              # 获取总响应时间
+              TIME=$(curl -o /dev/null -s -L -m 5 -w "%{time_total}" "https://$NODE" || echo "9.999")
+              echo "  第 $i 次测试延迟: ${TIME}s"
+              
+              # 比较并保留最小值
+              if (( $(echo "$TIME < $MIN_TIME" | bc -l) )); then
+                MIN_TIME=$TIME
+              fi
+            done
+            
+            # 解析 IP
             IP=$(dig +short "$NODE" | grep -E '^[0-9.]+$' | head -n1)
             
-            if [[ ! -z "$IP" && "$TIME" != "9.999" ]]; then
-              # 拼接格式：延迟(第一列) IP(第二列)
-              RESULTS="${RESULTS}${TIME} ${IP}"$'\n'
-              echo "节点 $NODE -> 延迟: ${TIME}s | IP: $IP"
-            else
-              echo "节点 $NODE 无法连通或无法解析，跳过。"
+            if [[ ! -z "$IP" && "$MIN_TIME" != "9.999" ]]; then
+              RESULTS="${RESULTS}${MIN_TIME} ${IP}"$'\n'
+              echo "节点 $NODE 最终取最小值: ${MIN_TIME}s | IP: $IP"
             fi
           done
 
-          # 核心排序逻辑：
-          # 1. sort -n 按数值从小到大排（延迟最低的在第一行）
-          # 2. uniq 去重（防止不同域名解析到同一个IP重复添加）
-          # 3. head -2 取延迟最低的两个 IP
-          FINAL_IPS=$(echo "$RESULTS" | sed '/^$/d' | sort -n | awk '{print $2}' | uniq | head -2 | tr '\n' ' ')
+          # 按照 5 次测试中的最小值进行全国/全球排序，取最快的一个
+          BEST_IP=$(echo "$RESULTS" | sed '/^$/d' | sort -n | head -n1 | awk '{print $2}')
 
-          if [ -z "$FINAL_IPS" ]; then
-            echo "错误：没有节点可以连通，为保护现有解析，停止更新。"
+          if [ -z "$BEST_IP" ]; then
+            echo "错误：未找到任何可用节点，停止更新。"
             exit 1
           fi
 
-          echo "TOPIPS=$FINAL_IPS" >> $GITHUB_ENV
-          echo "最终选定的优质 IP (第一位为最低延迟): $FINAL_IPS"
+          echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
+          echo "选定的最优 IP (5次测试中延迟最低): $BEST_IP"
 
-      - name: Zero-Downtime Update Cloudflare
+      - name: Update Cloudflare DNS
         run: |
-          # 1. 获取现有记录 ID（备份用于后续删除）
-          OLD_IDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
+          # 1. 获取现有记录 ID
+          EXISTING_RECORDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
-            -H "Content-Type: application/json" | jq -r '.result[].id')
+            -H "Content-Type: application/json")
+          
+          RECORD_IDS=$(echo "$EXISTING_RECORDS" | jq -r '.result[].id')
 
-          # 2. 先添加排序后的新 IP
-          # 按照 $TOPIPS 的顺序依次添加，Cloudflare 会根据添加顺序显示
-          for IP in $TOPIPS; do
-            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
-              -H "Authorization: Bearer $CF_API_TOKEN" \
-              -H "Content-Type: application/json" \
-              --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$IP\",\"ttl\":1,\"proxied\":false}"
-            echo "已成功添加 A 记录: $IP"
-          done
+          # 2. 先添加最新的最优 IP 记录（零停机切换）
+          curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$BEST_IP\",\"ttl\":1,\"proxied\":false}"
+          echo "已成功添加新 A 记录: $BEST_IP"
 
-          # 3. 安全删除旧记录
-          if [ ! -z "$OLD_IDS" ]; then
-            for ID in $OLD_IDS | tr ' ' '\n'; do
-              if [ "$ID" != "null" ]; then
-                curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
-                  -H "Authorization: Bearer $CF_API_TOKEN" \
-                  -H "Content-Type: application/json"
-                echo "已清理旧记录 ID: $ID"
-              fi
+          # 3. 删除旧记录
+          if [[ ! -z "$RECORD_IDS" && "$RECORD_IDS" != "null" ]]; then
+            for ID in $RECORD_IDS; do
+              # 增加判断，防止误删刚添加的记录（基于 ID 排除）
+              curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+                -H "Content-Type: application/json"
+              echo "已清理旧记录 ID: $ID"
             done
           fi
-          echo "所有操作已完成，解析已更新至最优节点。"
+          echo "更新成功！"
