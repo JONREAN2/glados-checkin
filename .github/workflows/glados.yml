@@ -1,4 +1,4 @@
-name: Top1 Node (Dynamic IP Extraction + 5x Ping)
+name: Top1 Node (API Dynamic Extraction + 5x Ping)
 
 on:
   schedule:
@@ -16,17 +16,26 @@ jobs:
 
       - name: Define Environment
         run: |
-          # 1. 基础节点列表
+          # 1. 基础固定节点列表
           BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz 172.64.52.124"
           
-          # 2. 动态提取 ip.v2too.top 的前两个 IP
-          echo "正在从 ip.v2too.top 提取优选 IP..."
-          DYNAMIC_IPS=$(dig +short ip.v2too.top | grep -E '^[0-9.]+$' | head -n2 | xargs)
+          # 2. 从 API 动态提取延迟最低的前 2 个 IP
+          echo "正在从 API 获取最新优选节点..."
+          # 逻辑：获取 JSON -> 过滤出 A 记录/IP -> 按 latency 数值升序排序 -> 取前两个 IP
+          API_DATA=$(curl -s -m 10 "https://ip.v2too.top/api/nodes")
+          
+          if [ ! -z "$API_DATA" ]; then
+            DYNAMIC_IPS=$(echo "$API_DATA" | jq -r 'sort_by(.latency) | .[:2] | .[].ip' | xargs)
+            echo "API 提取出的最优 2 个 IP: $DYNAMIC_IPS"
+          else
+            echo "警告：无法访问 API，将仅使用基础节点。"
+            DYNAMIC_IPS=""
+          fi
           
           # 3. 合并所有待测目标
           ALL_NODES="$BASE_NODES $DYNAMIC_IPS"
           
-          echo "最终测试目标列表: $ALL_NODES"
+          echo "最终汇总测试目标: $ALL_NODES"
           echo "NODES=$ALL_NODES" >> $GITHUB_ENV
           echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
           echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
@@ -37,18 +46,18 @@ jobs:
           RESULTS=""
           for NODE in $NODES; do
             echo "------------------------------------------------"
-            echo "正在对节点进行 5 次测速: $NODE ..."
+            echo "正在对节点进行 5 次实地测速: $NODE ..."
             
             node_best="9.999"
             for i in {1..5}; do
-              # 获取延迟，确保不粘连
+              # 隔离输出，防止粘连
               TIME_RAW=$(curl -o /dev/null -s -L -k -m 3 -w "%{time_total}\n" "https://$NODE" || echo "9.999")
               TIME=$(echo "$TIME_RAW" | grep -oE '[0-9.]+' | head -n1)
               [[ -z "$TIME" ]] && TIME="9.999"
               
-              echo "  第 $i 次测试延迟: ${TIME}s"
+              echo "  测试 $i: ${TIME}s"
               
-              # 使用 awk 比较浮点数
+              # 浮点数比较逻辑 (使用 awk 避开 bc 报错)
               is_better=$(awk -v t1="$TIME" -v t2="$node_best" 'BEGIN {print (t1 < t2)}')
               if [ "$is_better" -eq 1 ]; then
                 node_best=$TIME
@@ -64,24 +73,24 @@ jobs:
             
             if [[ ! -z "$IP" && "$node_best" != "9.999" ]]; then
               RESULTS="${RESULTS}${node_best} ${IP}"$'\n'
-              echo ">> 节点 $NODE 最终取最小值: ${node_best}s | IP: $IP"
+              echo ">> 节点 $NODE 实测最优: ${node_best}s | IP: $IP"
             fi
           done
 
           echo "------------------------------------------------"
-          echo "--- 延迟对账单 (从小到大) ---"
+          echo "--- 最终延迟对账单 (实测排序) ---"
           SORTED_RESULTS=$(echo "$RESULTS" | sed '/^$/d' | sort -n)
           echo "$SORTED_RESULTS"
           
           BEST_IP=$(echo "$SORTED_RESULTS" | head -n1 | awk '{print $2}')
 
           if [ -z "$BEST_IP" ]; then
-            echo "错误：未找到可用节点。"
+            echo "错误：未找到任何可用节点。"
             exit 1
           fi
 
           echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
-          echo "🏆 最终胜出 IP: $BEST_IP"
+          echo "🏆 全局实测冠军: $BEST_IP"
 
       - name: Update Cloudflare DNS (Safe Mode)
         run: |
@@ -90,7 +99,7 @@ jobs:
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
           
-          # 提取所有 ID
+          # 提取记录 ID 列表
           RECORD_IDS=$(echo "$EXIST_DATA" | jq -r '.result[]?.id // empty')
           FIRST_ID=$(echo "$RECORD_IDS" | head -n1)
 
@@ -111,13 +120,13 @@ jobs:
           if echo "$UPDATE_RES" | jq -e '.success' > /dev/null; then
             echo "✅ DNS 更新成功: $BEST_IP"
             
-            # 清理其他同名但 ID 不同的记录，确保解析唯一性
+            # 清理冗余重复记录 (排除当前更新成功的 ID)
             for ID in $RECORD_IDS; do
               if [[ "$ID" != "$FIRST_ID" && "$ID" != "null" ]]; then
                 curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
                   -H "Authorization: Bearer $CF_API_TOKEN" \
                   -H "Content-Type: application/json"
-                echo "🗑️ 清理冗余记录: $ID"
+                echo "🗑️ 清理重复记录 ID: $ID"
               fi
             done
           else
