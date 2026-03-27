@@ -19,21 +19,18 @@ jobs:
           # 1. 基础固定节点列表
           BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz 172.64.52.124"
           
-          # 2. 从 API 获取数据并按 speed 从大到小提取前二
-          echo "正在从 API 获取情报节点 (按 Speed 排名)..."
+          # 2. 从 API 获取数据（已按 speed 排序，直接取前2个）
+          echo "正在从 API 获取情报节点 (已按 Speed 排序)..."
           API_RES=$(curl -s -m 10 "https://ip.v2too.top/api/nodes")
           
-          # 修正提取逻辑：
-          # .data | map(select(.speed != null)) 确保 speed 有值
-          # sort_by(.speed | tonumber) | reverse 按 speed 数值从大到小排列
-          DYNAMIC_IPS=$(echo "$API_RES" | jq -r '.data | map(select(.speed != null)) | sort_by(.speed | tonumber) | reverse | .[:2] | .[].ip' | xargs)
+          DYNAMIC_IPS=$(echo "$API_RES" | jq -r '.data[:2] | .[].ip' | xargs)
           
           if [ -z "$DYNAMIC_IPS" ] || [ "$DYNAMIC_IPS" == "null" ]; then
              echo "API 提取失败，检查返回格式..."
              DYNAMIC_IPS=""
           fi
           
-          echo "API 速度排名前二的 IP: $DYNAMIC_IPS"
+          echo "API 前2节点: $DYNAMIC_IPS"
           
           # 3. 合并所有目标
           ALL_NODES="$BASE_NODES $DYNAMIC_IPS"
@@ -54,7 +51,6 @@ jobs:
               TIME=$(echo "$TIME_RAW" | grep -oE '[0-9.]+' | head -n1)
               [[ -z "$TIME" ]] && TIME="9.999"
               echo "  测试 $i: ${TIME}s"
-              # 使用 awk 比较，保留该节点 5 次里延迟最低的一次
               is_better=$(awk -v t1="$TIME" -v t2="$node_best" 'BEGIN {print (t1 < t2)}')
               if [ "$is_better" -eq 1 ]; then node_best=$TIME; fi
             done
@@ -77,7 +73,6 @@ jobs:
           SORTED_LIST=$(echo "$RESULTS" | sed '/^$/d' | sort -n)
           echo "$SORTED_LIST"
           
-          # 选出实地测试中延迟最低的冠军
           BEST_IP=$(echo "$SORTED_LIST" | head -n1 | awk '{print $2}')
 
           if [ -z "$BEST_IP" ]; then
@@ -113,7 +108,6 @@ jobs:
 
           if echo "$UPDATE_RES" | jq -e '.success' > /dev/null; then
             echo "✅ DNS 更新成功: $BEST_IP"
-            # 清理冗余记录
             for ID in $RECORD_IDS; do
               if [[ "$ID" != "$FIRST_ID" && "$ID" != "null" ]]; then
                 curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
