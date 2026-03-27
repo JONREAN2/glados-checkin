@@ -2,8 +2,8 @@ name: Top1 Node (5x Ping) + Zero-Downtime Update
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 每3小时执行一次
-  workflow_dispatch: {}    # 支持手动触发
+    - cron: '0 * * * *'  # 每小时执行一次
+  workflow_dispatch: {}
 
 jobs:
   update-dns:
@@ -12,11 +12,11 @@ jobs:
       - uses: actions/checkout@v3
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y curl jq dnsutils
+        run: sudo apt-get update && sudo apt-get install -y curl jq dnsutils bc
 
       - name: Define Environment
         run: |
-          # 待检测的三个节点
+          # 待检测的节点（支持域名和纯 IP）
           NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz 172.64.52.124" 
           echo "NODES=$NODES" >> $GITHUB_ENV
           echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
@@ -27,32 +27,43 @@ jobs:
         run: |
           RESULTS=""
           for NODE in $NODES; do
+            echo "------------------------------------------------"
             echo "正在对节点进行 5 次测速: $NODE ..."
             
             MIN_TIME=9.999
-            # 内部循环 5 次，取最小值
             for i in {1..5}; do
-              # 获取总响应时间
-              TIME=$(curl -o /dev/null -s -L -m 5 -w "%{time_total}" "https://$NODE" || echo "9.999")
+              # 关键修复：-k 忽略证书错误，grep 强制提取纯数字防止数据粘连
+              TIME_RAW=$(curl -o /dev/null -s -L -k -m 3 -w "%{time_total}" "https://$NODE" || echo "9.999")
+              TIME=$(echo "$TIME_RAW" | grep -oE '[0-9.]+' | head -n1)
+              [[ -z "$TIME" ]] && TIME="9.999"
+
               echo "  第 $i 次测试延迟: ${TIME}s"
               
-              # 比较并保留最小值
               if (( $(echo "$TIME < $MIN_TIME" | bc -l) )); then
                 MIN_TIME=$TIME
               fi
             done
             
-            # 解析 IP
-            IP=$(dig +short "$NODE" | grep -E '^[0-9.]+$' | head -n1)
+            # 关键修复：判断 NODE 是否为纯 IP，如果是则直接使用，否则执行 dig
+            if [[ "$NODE" =~ ^[0-9.]+$ ]]; then
+              IP=$NODE
+            else
+              IP=$(dig +short "$NODE" | grep -E '^[0-9.]+$' | head -n1)
+            fi
             
             if [[ ! -z "$IP" && "$MIN_TIME" != "9.999" ]]; then
               RESULTS="${RESULTS}${MIN_TIME} ${IP}"$'\n'
-              echo "节点 $NODE 最终取最小值: ${MIN_TIME}s | IP: $IP"
+              echo ">> 节点 $NODE 最终取最小值: ${MIN_TIME}s | IP: $IP"
             fi
           done
 
-          # 按照 5 次测试中的最小值进行全国/全球排序，取最快的一个
-          BEST_IP=$(echo "$RESULTS" | sed '/^$/d' | sort -n | head -n1 | awk '{print $2}')
+          # 排序并对账
+          echo "------------------------------------------------"
+          echo "--- 延迟对账单 (从小到大) ---"
+          SORTED_RESULTS=$(echo "$RESULTS" | sed '/^$/d' | sort -n)
+          echo "$SORTED_RESULTS"
+          
+          BEST_IP=$(echo "$SORTED_RESULTS" | head -n1 | awk '{print $2}')
 
           if [ -z "$BEST_IP" ]; then
             echo "错误：未找到任何可用节点，停止更新。"
@@ -60,32 +71,47 @@ jobs:
           fi
 
           echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
-          echo "选定的最优 IP (5次测试中延迟最低): $BEST_IP"
+          echo "🏆 选定的最优 IP: $BEST_IP"
 
-      - name: Update Cloudflare DNS
+      - name: Update Cloudflare DNS (PUT Mode)
         run: |
           # 1. 获取现有记录 ID
           EXISTING_RECORDS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
           
-          RECORD_IDS=$(echo "$EXISTING_RECORDS" | jq -r '.result[].id')
+          RECORD_ID=$(echo "$EXISTING_RECORDS" | jq -r '.result[0].id')
 
-          # 2. 先添加最新的最优 IP 记录（零停机切换）
-          curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$BEST_IP\",\"ttl\":1,\"proxied\":false}"
-          echo "已成功添加新 A 记录: $BEST_IP"
-
-          # 3. 删除旧记录
-          if [[ ! -z "$RECORD_IDS" && "$RECORD_IDS" != "null" ]]; then
-            for ID in $RECORD_IDS; do
-              # 增加判断，防止误删刚添加的记录（基于 ID 排除）
-              curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
-                -H "Authorization: Bearer $CF_API_TOKEN" \
-                -H "Content-Type: application/json"
-              echo "已清理旧记录 ID: $ID"
-            done
+          if [[ "$RECORD_ID" != "null" && ! -z "$RECORD_ID" ]]; then
+            echo "发现现有记录 ID: $RECORD_ID，执行覆盖更新 (PUT)..."
+            # 采用 PUT 模式，即使 IP 没变也不会报错
+            UPDATE_RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$BEST_IP\",\"ttl\":1,\"proxied\":false}")
+          else
+            echo "未发现记录，执行新增 (POST)..."
+            UPDATE_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$BEST_IP\",\"ttl\":1,\"proxied\":false}")
           fi
-          echo "更新成功！"
+
+          # 检查结果并清理冗余
+          if echo "$UPDATE_RESPONSE" | jq -e '.success' > /dev/null; then
+            echo "✅ DNS 更新成功: $BEST_IP"
+            
+            # 如果之前脚本出过错导致有多条重复记录，这里会一并清理
+            EXTRA_IDS=$(echo "$EXISTING_RECORDS" | jq -r '.result[1:].id // empty')
+            for E_ID in $EXTRA_IDS; do
+              if [[ "$E_ID" != "null" ]]; then
+                curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$E_ID" \
+                  -H "Authorization: Bearer $CF_API_TOKEN" \
+                  -H "Content-Type: application/json"
+                echo "🗑️ 已清理冗余记录: $E_ID"
+              fi
+            done
+          else
+            echo "❌ 更新失败: $(echo $UPDATE_RESPONSE | jq -c '.errors')"
+            exit 1
+          fi
