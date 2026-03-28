@@ -21,7 +21,7 @@ jobs:
           
           # 2. 从 API 获取数据（已按 speed 排序，仅在前2名中筛选172段）
           echo "正在从 API 获取情报节点 (前2名筛选172段)..."
-          API_RES=$(curl -s -m 10 "https://ip.v2too.top/api/nodes")
+          API_RES=$(curl -s -m 10 " ")
           
           DYNAMIC_IPS=$(echo "$API_RES" | jq -r '.data[:2] | map(select(.ip | startswith("172."))) | .[].ip' | xargs)
           
