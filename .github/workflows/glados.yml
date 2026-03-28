@@ -17,7 +17,7 @@ jobs:
       - name: Define Environment & Extract API (By Speed)
         run: |
           # 1. 基础固定节点列表
-          BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz *.cloudflare.22336666.xyz 172.64.52.124"
+          BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz  172.64.52.124"
           
           # 2. 从 API 获取数据（已按 speed 排序，仅在前2名中筛选172段）
           echo "正在从 API 获取情报节点 (前2名筛选172段)..."
