@@ -19,18 +19,18 @@ jobs:
           # 1. 基础固定节点列表
           BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz *.cloudflare.22336666.xyz 172.64.52.124"
           
-          # 2. 从 API 获取数据（已按 speed 排序，直接取前2个）
-          echo "正在从 API 获取情报节点 (已按 Speed 排序)..."
+          # 2. 从 API 获取数据（已按 speed 排序，仅在前2名中筛选172段）
+          echo "正在从 API 获取情报节点 (前2名筛选172段)..."
           API_RES=$(curl -s -m 10 "https://ip.v2too.top/api/nodes")
           
-          DYNAMIC_IPS=$(echo "$API_RES" | jq -r '.data[:2] | .[].ip' | xargs)
+          DYNAMIC_IPS=$(echo "$API_RES" | jq -r '.data[:2] | map(select(.ip | startswith("172."))) | .[].ip' | xargs)
           
           if [ -z "$DYNAMIC_IPS" ] || [ "$DYNAMIC_IPS" == "null" ]; then
-             echo "API 提取失败，检查返回格式..."
+             echo "前2名中无172段节点..."
              DYNAMIC_IPS=""
           fi
           
-          echo "API 前2节点: $DYNAMIC_IPS"
+          echo "API 前2名中的172节点: $DYNAMIC_IPS"
           
           # 3. 合并所有目标
           ALL_NODES="$BASE_NODES $DYNAMIC_IPS"
@@ -55,7 +55,6 @@ jobs:
               if [ "$is_better" -eq 1 ]; then node_best=$TIME; fi
             done
             
-            # 识别 IP
             if [[ "$NODE" =~ ^[0-9.]+$ ]]; then
               IP=$NODE
             else
