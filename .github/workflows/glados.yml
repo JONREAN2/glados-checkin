@@ -1,8 +1,8 @@
-name: Top1 Node (TTFB + Jitter Filter + Parallel)
+name: Top1 Node (Parallel TTFB + Jitter Filter)
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 * * * *'  # 每小时执行一次
   workflow_dispatch: {}
 
 jobs:
@@ -16,7 +16,9 @@ jobs:
 
       - name: Define Environment
         run: |
+          # 待测量的 7 个核心节点
           BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz *.cloudflare.22336666.xyz 172.64.52.124"
+          
           echo "NODES=$BASE_NODES" >> $GITHUB_ENV
           echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
           echo "CF_ZONE_ID=${{ secrets.CF_ZONE_ID }}" >> $GITHUB_ENV
@@ -28,12 +30,13 @@ jobs:
         run: |
           test_node () {
             NODE=$1
-            echo "测速: $NODE"
+            echo "正在测速: $NODE" >&2
 
             TIMES=""
             FAIL=0
 
             for i in {1..5}; do
+              # 获取 TTFB (time_starttransfer)
               T=$(curl -o /dev/null -s -L -k -m 3 \
                 -w "%{time_starttransfer}\n" \
                 "https://$NODE" || echo "9.999")
@@ -41,33 +44,33 @@ jobs:
               T=$(echo "$T" | grep -oE '[0-9.]+' | head -n1)
               [[ -z "$T" ]] && T="9.999"
 
-              echo "  第$i次: $T"
+              echo "  $NODE 第$i次: ${T}s" >&2
               TIMES="$TIMES $T"
 
-              # 超过1秒算失败
-              cmp=$(awk -v t="$T" 'BEGIN{print (t>1.0)}')
+              # 延迟超过 1.5s 判定为单次波动
+              cmp=$(awk -v t="$T" 'BEGIN{print (t>1.5)}')
               [[ $cmp -eq 1 ]] && FAIL=$((FAIL+1))
             done
 
-            # 超过2次失败直接丢弃
+            # 5次里有2次以上超时的，直接丢弃（稳定性差）
             if [[ $FAIL -ge 2 ]]; then
-              echo "❌ 不稳定丢弃: $NODE"
+              echo "❌ 不稳定丢弃: $NODE" >&2
               return
             fi
 
-            # 计算最小值
-            BEST=$(echo $TIMES | tr ' ' '\n' | sort -n | head -n1)
-
-            # 计算抖动（max-min）
+            # 计算最小值、最大值和抖动
             MIN=$(echo $TIMES | tr ' ' '\n' | sort -n | head -n1)
             MAX=$(echo $TIMES | tr ' ' '\n' | sort -n | tail -n1)
             JITTER=$(awk -v max="$MAX" -v min="$MIN" 'BEGIN{print max-min}')
 
-            # 抖动 >0.5 认为不稳定
-            bad=$(awk -v j="$JITTER" 'BEGIN{print (j>0.5)}')
-            [[ $bad -eq 1 ]] && echo "⚠️ 高抖动: $NODE ($JITTER)"
+            # 抖动 > 0.8s 判定为网络极度不稳定，丢弃
+            bad=$(awk -v j="$JITTER" 'BEGIN{print (j>0.8)}')
+            if [[ $bad -eq 1 ]]; then
+               echo "⚠️ 抖动过高丢弃: $NODE ($JITTER)" >&2
+               return
+            fi
 
-            # 解析IP
+            # 解析 IP
             if [[ "$NODE" =~ ^[0-9.]+$ ]]; then
               IP=$NODE
             else
@@ -76,29 +79,33 @@ jobs:
 
             [[ -z "$IP" ]] && return
 
-            echo "$BEST $IP"
+            # 输出结果用于排序
+            echo "$MIN $IP"
           }
 
           export -f test_node
 
-          RESULTS=$(printf "%s\n" $NODES | xargs -I {} -P 5 bash -c 'test_node "$@"' _ {})
+          # 并行执行所有节点测试
+          RESULTS=$(printf "%s\n" $NODES | xargs -n 1 -I {} -P 5 bash -c 'test_node "{}"')
 
-          echo "----结果----"
+          echo "---- 实测汇总结果 ----"
           echo "$RESULTS"
 
+          # 选出实测延迟最低的 IP
           SORTED=$(echo "$RESULTS" | sed '/^$/d' | sort -n)
           BEST_IP=$(echo "$SORTED" | head -n1 | awk '{print $2}')
 
           if [ -z "$BEST_IP" ]; then
-            echo "❌ 没有可用节点"
+            echo "❌ 没有任何可用节点通过测试"
             exit 1
           fi
 
           echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
-          echo "🏆 最优IP: $BEST_IP"
+          echo "🏆 冠军 IP: $BEST_IP"
 
       - name: Update Cloudflare DNS
         run: |
+          # 1. 获取现有记录
           EXIST_DATA=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
@@ -106,12 +113,14 @@ jobs:
           RECORD_IDS=$(echo "$EXIST_DATA" | jq -r '.result[]?.id // empty')
           FIRST_ID=$(echo "$RECORD_IDS" | head -n1)
 
-          if [[ ! -z "$FIRST_ID" ]]; then
+          if [[ ! -z "$FIRST_ID" && "$FIRST_ID" != "null" ]]; then
+            echo "正在更新记录: $FIRST_ID"
             UPDATE_RES=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$FIRST_ID" \
               -H "Authorization: Bearer $CF_API_TOKEN" \
               -H "Content-Type: application/json" \
               --data "{\"type\":\"A\",\"name\":\"$CF_RECORD_NAME\",\"content\":\"$BEST_IP\",\"ttl\":1,\"proxied\":false}")
           else
+            echo "正在新增记录..."
             UPDATE_RES=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
               -H "Authorization: Bearer $CF_API_TOKEN" \
               -H "Content-Type: application/json" \
@@ -119,22 +128,23 @@ jobs:
           fi
 
           if echo "$UPDATE_RES" | jq -e '.success' > /dev/null; then
-            echo "✅ 更新成功"
+            echo "✅ DNS 更新成功: $BEST_IP"
+            
+            # 清理多余记录
+            for ID in $RECORD_IDS; do
+              if [[ "$ID" != "$FIRST_ID" ]]; then
+                curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" -H "Authorization: Bearer $CF_API_TOKEN"
+              fi
+            done
 
-            MSG="🏆 Emby优选节点
+            # Telegram 通知
+            MSG="🏆 Emby优选成功
 IP: $BEST_IP
-时间: $(date '+%F %T')"
-
-            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-              -d chat_id="$TG_CHAT_ID" \
-              -d text="$MSG"
+时间: $(date '+%Y-%m-%d %H:%M:%S')"
+            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" -d chat_id="$TG_CHAT_ID" -d text="$MSG"
           else
             ERR=$(echo $UPDATE_RES | jq -c '.errors')
             echo "❌ 失败: $ERR"
-
-            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-              -d chat_id="$TG_CHAT_ID" \
-              -d text="❌ DNS失败: $ERR"
-
+            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" -d chat_id="$TG_CHAT_ID" -d text="❌ DNS更新失败: $ERR"
             exit 1
           fi
