@@ -2,14 +2,14 @@ name: Top1 Node (Classic Speed + Full TG Report)
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 */2 * * *'  # 每2小时执行一次
   workflow_dispatch: {}
 
 jobs:
   update-dns:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: checkout@v3
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y curl jq dnsutils bc
@@ -34,18 +34,16 @@ jobs:
             
             node_best="9.999"
             for i in {1..5}; do
-              # 回归使用 time_total，这是最稳定的测速指标
+              # 使用 time_total 获取最直观的总响应时间
               TIME_RAW=$(curl -o /dev/null -s -L -k -m 3 -w "%{time_total}\n" "https://$CLEAN_TARGET" || echo "9.999")
               TIME=$(echo "$TIME_RAW" | grep -oE '[0-9.]+' | head -n1)
               
-              # 关键修复：如果 curl 返回 0.000，强制设为 9.999 避免误判
-              if [[ -z "$TIME" ]] || [[ "$TIME" == "0.000000" ]] || [[ "$TIME" == "0" ]]; then
-                TIME="9.999"
-              fi
+              # 如果获取失败则设为极大值，但保留真实的 0.000
+              [[ -z "$TIME" ]] && TIME="9.999"
               
               echo "  测试 $i: ${TIME}s"
               # 选取 5 次中最好的结果
-              is_better=$(awk -v t1="$TIME" -v t2="$node_best" 'BEGIN {print (t1 < t2)}')
+              is_better=$(awk -v t1="$TIME" -v t2="$node_best" 'BEGIN {print (t1 <= t2)}')
               if [ "$is_better" -eq 1 ]; then node_best=$TIME; fi
             done
             
@@ -56,15 +54,15 @@ jobs:
               IP=$(dig +short "$CLEAN_TARGET" | grep -E '^[0-9.]+$' | head -n1)
             fi
             
-            # 只有拿到有效 IP 且延迟不是 9.999 的才加入汇总
+            # 只要拿到有效 IP 且不是彻底连接失败的才加入汇总
             if [[ ! -z "$IP" && "$node_best" != "9.999" ]]; then
               RESULTS="${RESULTS}${node_best} ${IP} ${NODE}"$'\n'
             fi
           done
 
           echo "---- 最终排序结果 ----"
-          # 过滤掉可能的空行和极小值，按延迟升序
-          SORTED_LIST=$(echo "$RESULTS" | awk '$1 > 0.0001' | sort -n)
+          # 按延迟升序排列，保留 0.000 结果
+          SORTED_LIST=$(echo "$RESULTS" | sed '/^$/d' | sort -n)
           echo "$SORTED_LIST"
           
           # 提取冠军
@@ -87,7 +85,6 @@ jobs:
 
       - name: Update Cloudflare DNS & Notify
         run: |
-          # 更新 Cloudflare
           EXIST_DATA=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
@@ -110,12 +107,11 @@ jobs:
           if echo "$UPDATE_RES" | jq -e '.success' > /dev/null; then
             echo "✅ 更新成功: $BEST_IP"
             
-            # 清理多余记录
             for ID in $RECORD_IDS; do
               [[ "$ID" != "$FIRST_ID" ]] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" -H "Authorization: Bearer $CF_API_TOKEN"
             done
             
-            # 组合消息
+            # 使用 printf 组合消息，保持顶格排版
             MSG=$(printf "🚀 Emby 优选完成\n-----------------------\n🏆 冠军: %s\n\n📊 实测排位表:\n%s\n\n⏰ 时间: %s" \
                   "$BEST_IP" "$TOP_REPORT" "$(date '+%Y-%m-%d %H:%M:%S')")
 
