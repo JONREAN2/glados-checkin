@@ -1,8 +1,8 @@
-name: Top1 Node (Fixed IPv4 Validation)
+name: Top1 Node (Final Stable Version)
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 * * * *'  # 每小时执行一次
   workflow_dispatch: {}
 
 jobs:
@@ -16,8 +16,8 @@ jobs:
 
       - name: Define Environment
         run: |
-          # 修正点：通配符域名如果无法直接解析，建议换成具体子域名，或者脚本会自动跳过无法解析的项
-          BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz 172.64.52.124"
+          # 待测量的核心节点列表
+          BASE_NODES="emos.dirige.de5.net clun.top emby.67982.eu.cc v4.iemby.cn pro.111196123.xyz cf.cloudflare.22336666.xyz 172.64.52.124"
           
           echo "NODES=$BASE_NODES" >> $GITHUB_ENV
           echo "CF_API_TOKEN=${{ secrets.CF_API_TOKEN }}" >> $GITHUB_ENV
@@ -30,74 +30,76 @@ jobs:
         run: |
           test_node () {
             NODE=$1
-            # 过滤掉通配符星号，防止 dig 报错
-            CLEAN_NODE=$(echo "$NODE" | sed 's/\*\.//g')
-            echo "正在测速: $CLEAN_NODE" >&2
-
-            # 解析 IP 并严格校验是否为合法的 IPv4
-            if [[ "$CLEAN_NODE" =~ ^[0-9.]+$ ]]; then
-              IP=$CLEAN_NODE
+            CLEAN_TARGET=$(echo "$NODE" | sed 's/\*\.//g')
+            
+            # 解析 IP
+            if [[ "$CLEAN_TARGET" =~ ^[0-9.]+$ ]]; then
+              IP=$CLEAN_TARGET
             else
-              IP=$(dig +short "$CLEAN_NODE" | grep -E '^[0-9.]+$' | head -n1)
+              IP=$(dig +short "$CLEAN_TARGET" | grep -E '^[0-9.]+$' | head -n1)
             fi
 
-            # 如果解析不到有效 IP，直接退出
-            if [[ -z "$IP" ]]; then
-              echo "❌ 无法解析 IP: $CLEAN_NODE" >&2
-              return
-            fi
+            if [[ -z "$IP" ]]; then return; fi
 
             TIMES=""
-            FAIL=0
+            FAIL_COUNT=0
             for i in {1..5}; do
-              T=$(curl -o /dev/null -s -L -k -m 3 -w "%{time_starttransfer}\n" "https://$CLEAN_NODE" || echo "9.999")
+              # 探测 TTFB，增加 2秒连接超时
+              T=$(curl -o /dev/null -s -L -k --connect-timeout 2 -m 3 \
+                -w "%{time_starttransfer}\n" \
+                "https://$IP" || echo "9.999")
+
               T=$(echo "$T" | grep -oE '[0-9.]+' | head -n1)
-              [[ -z "$T" ]] && T="9.999"
-              echo "  $CLEAN_NODE 第$i次: ${T}s" >&2
+              
+              # 彻底封杀 0.000000 异常值
+              if [[ -z "$T" ]] || [[ "$T" == "0.000000" ]]; then T="9.999"; fi
+
               TIMES="$TIMES $T"
-              cmp=$(awk -v t="$T" 'BEGIN{print (t>1.5)}')
-              [[ $cmp -eq 1 ]] && FAIL=$((FAIL+1))
+              is_bad=$(awk -v t="$T" 'BEGIN{print (t>1.5 || t<0.00001)}')
+              [[ $is_bad -eq 1 ]] && FAIL_COUNT=$((FAIL_COUNT+1))
             done
 
-            if [[ $FAIL -ge 2 ]]; then return; fi
+            # 5次里有3次及以上异常则剔除
+            if [[ $FAIL_COUNT -ge 3 ]]; then return; fi
 
+            # 取实测最小值
             MIN=$(echo $TIMES | tr ' ' '\n' | sort -n | head -n1)
-            MAX=$(echo $TIMES | tr ' ' '\n' | sort -n | tail -n1)
-            JITTER=$(awk -v max="$MAX" -v min="$MIN" 'BEGIN{print max-min}')
+            if [[ "$MIN" == "9.999" ]]; then return; fi
 
-            bad=$(awk -v j="$JITTER" 'BEGIN{print (j>0.8)}')
-            [[ $bad -eq 1 ]] && return
-
-            # 最终输出格式：延迟 IP
-            echo "$MIN $IP"
+            # 输出：延迟 IP 原始节点
+            echo "$MIN $IP $NODE"
           }
 
           export -f test_node
+          # 并发执行测速
           RESULTS=$(printf "%s\n" $NODES | xargs -n 1 -I {} -P 5 bash -c 'test_node "{}"')
 
-          echo "---- 实测汇总结果 ----"
+          echo "---- 实测汇总 ----"
           echo "$RESULTS"
 
-          # 排序并提取，增加一层过滤确保 BEST_IP 必须符合 IPv4 格式
-          SORTED=$(echo "$RESULTS" | sed '/^$/d' | sort -n)
-          BEST_IP=$(echo "$SORTED" | grep -E '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | awk '{print $2}')
+          # 过滤 0 值并按延迟升序
+          SORTED_LIST=$(echo "$RESULTS" | awk '$1 > 0.00001' | sort -n)
+          
+          # 格式化 Top 4 报告
+          TOP_REPORT=$(echo "$SORTED_LIST" | head -n 4 | awk '{printf "No.%d: %s (%ss) 来自 %s\n", NR, $2, $1, $3}')
+          
+          # 提取最优 IP
+          BEST_IP=$(echo "$SORTED_LIST" | head -n1 | awk '{print $2}')
 
           if [ -z "$BEST_IP" ]; then
-            echo "❌ 没有任何合法 IP 通过测试"
+            echo "❌ 未找到通过测试的有效 IP"
             exit 1
           fi
 
+          # 写入环境变量，使用 EOF 处理多行报告
           echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
-          echo "🏆 冠军 IP: $BEST_IP"
+          echo "TOP_REPORT<<EOF" >> $GITHUB_ENV
+          echo "$TOP_REPORT" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
-      - name: Update Cloudflare DNS
+      - name: Update Cloudflare DNS & Notify
         run: |
-          # 增加最后一道防线：检查 BEST_IP 是否为空
-          if [[ -z "$BEST_IP" ]]; then
-            echo "错误：BEST_IP 为空，取消 Cloudflare 更新"
-            exit 1
-          fi
-
+          # 获取现有 DNS 记录
           EXIST_DATA=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$CF_RECORD_NAME" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
@@ -118,19 +120,26 @@ jobs:
           fi
 
           if echo "$UPDATE_RES" | jq -e '.success' > /dev/null; then
-            echo "✅ 更新成功: $BEST_IP"
-            # 清理冗余
+            echo "✅ DNS 更新成功: $BEST_IP"
+            
+            # 清理多余记录
             for ID in $RECORD_IDS; do
               [[ "$ID" != "$FIRST_ID" ]] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" -H "Authorization: Bearer $CF_API_TOKEN"
             done
+            
+            # 使用 printf 格式化 TG 消息，避免缩进空格污染
+            MSG=$(printf "🚀 Emby 优选完成\n-----------------------\n🏆 冠军: %s\n\n📊 实测排位表:\n%s\n\n⏰ 时间: %s" \
+                  "$BEST_IP" "$TOP_REPORT" "$(date '+%Y-%m-%d %H:%M:%S')")
 
-            MSG="🏆 Emby优选成功
-            IP: $BEST_IP
-            时间: $(date '+%Y-%m-%d %H:%M:%S')"
-            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" -d chat_id="$TG_CHAT_ID" -d text="$MSG"
+            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+              --data-urlencode "chat_id=$TG_CHAT_ID" \
+              --data-urlencode "text=$MSG"
           else
             ERR=$(echo $UPDATE_RES | jq -c '.errors')
-            echo "❌ 失败: $ERR"
-            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" -d chat_id="$TG_CHAT_ID" -d text="❌ DNS失败: $ERR"
+            echo "❌ DNS 更新失败: $ERR"
+            
+            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+              --data-urlencode "chat_id=$TG_CHAT_ID" \
+              --data-urlencode "text=❌ DNS 更新失败: $ERR"
             exit 1
           fi
