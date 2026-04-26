@@ -29,9 +29,6 @@ jobs:
       - name: Run PingMe Script
         env:
           PINGME_DATA_2: ${{ secrets.PINGME_DATA_2 }}
-          PINGME_DATA_3: ${{ secrets.PINGME_DATA_3 }}
-          PINGME_DATA_4: ${{ secrets.PINGME_DATA_4 }}
-          PINGME_DATA_5: ${{ secrets.PINGME_DATA_5 }}
 
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_USER_ID: ${{ secrets.TG_USER_ID }}
