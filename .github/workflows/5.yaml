@@ -1,0 +1,36 @@
+# 文件路径：
+# .github/workflows/pingme.yml
+
+name: PingMe Auto Checkin4
+
+on:
+  schedule:
+    # 北京时间 08:30 / 20:30
+    # GitHub Actions 使用 UTC 时间，所以这里写 00:30 / 12:30 UTC
+     - cron: '30 15,16,4 * * *'  # 每天 04:00 和 10:00 UTC
+  workflow_dispatch:
+
+jobs:
+  pingme:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install axios
+        run: npm install axios
+
+      - name: Run PingMe Script
+        env:
+          PINGME_DATA_2: ${{ secrets.PINGME_DATA_5 }}
+
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_USER_ID: ${{ secrets.TG_USER_ID }}
+
+        run: node pingme.js
