@@ -3,7 +3,7 @@ const crypto = require("crypto");
 
 /**
  * =========================
- * 代理池（自动失败切换）
+ * 代理池（自动切换）
  * =========================
  */
 const PROXIES = [
@@ -17,18 +17,14 @@ function proxyUrl(url, index = 0) {
 
 /**
  * =========================
- * 基础配置
+ * 配置
  * =========================
  */
 const SECRET = "0fOiukQq7jXZV2GRi9LGlO";
 const API_HOST = "api.pingmeapp.net";
 
 const MAX_VIDEO = 5;
-const VIDEO_DELAY = 8000;
-const ACCOUNT_GAP = 3500;
-
-const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || "";
-const TG_USER_ID = process.env.TG_USER_ID || "";
+const ACCOUNT_GAP = 3000;
 
 /**
  * =========================
@@ -43,30 +39,34 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-function getUTCSignDate() {
-  const now = new Date();
-  const pad = n => String(n).padStart(2, "0");
-
-  return `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
+// 随机延迟（反风控核心）
+function randomSleep(min = 3000, max = 9000) {
+  const t = Math.floor(Math.random() * (max - min) + min);
+  return sleep(t);
 }
 
 /**
  * =========================
- * 风控识别（关键）
+ * 风控判断（关键）
  * =========================
  */
 function isBlocked(data) {
-  if (!data) return true;
-
-  const msg = (data.retmsg || "").toLowerCase();
-
+  const msg = (data?.retmsg || "").toLowerCase();
   return (
     msg.includes("验证码") ||
-    msg.includes("图形") ||
     msg.includes("captcha") ||
     msg.includes("verify") ||
+    msg.includes("图形") ||
     msg.includes("challenge")
   );
+}
+
+// 👉 判断是否“被降权（0收益）”
+function isZeroReward(data) {
+  const bonus = data?.result?.bonus;
+
+  // 明确 0 或 null 或 undefined
+  return bonus === 0 || bonus === "0" || bonus == null;
 }
 
 /**
@@ -74,6 +74,13 @@ function isBlocked(data) {
  * 签名
  * =========================
  */
+function getUTCSignDate() {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, "0");
+
+  return `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
+}
+
 function buildSignedParamsRaw(account) {
   const params = {};
 
@@ -105,72 +112,42 @@ function buildUrl(path, account) {
   return `https://${API_HOST}/app/${path}?${qs}`;
 }
 
-/**
- * =========================
- * headers
- * =========================
- */
 function buildHeaders(account) {
   return {
     Host: API_HOST,
     Accept: "application/json",
-    "Accept-Language": "zh-Hans-CN;q=1.0",
-    "Accept-Encoding": "gzip, deflate, br",
     "User-Agent": account.headers?.["User-Agent"] || "PingMe/1.9.3"
   };
 }
 
 /**
  * =========================
- * 请求（双代理）
+ * 请求（双proxy）
  * =========================
  */
 async function fetchApi(path, account) {
   const rawUrl = buildUrl(path, account);
   const headers = buildHeaders(account);
 
-  let lastErr = null;
-
   for (let i = 0; i < PROXIES.length; i++) {
     const url = proxyUrl(rawUrl, i);
 
     try {
-      const resp = await axios.get(url, {
+      const res = await axios.get(url, {
         headers,
         timeout: 20000
       });
 
-      return resp.data;
+      return res.data;
     } catch (e) {
-      lastErr = {
-        retcode: -1,
-        retmsg: e.message
-      };
+      console.log(`⚠️ Proxy${i + 1} fail`);
     }
-
-    console.log(`⚠️ Proxy${i + 1} failed → switching`);
   }
 
-  return lastErr || { retcode: -1, retmsg: "all proxy failed" };
-}
-
-/**
- * =========================
- * TG通知
- * =========================
- */
-async function sendTG(title, content) {
-  if (!TG_BOT_TOKEN || !TG_USER_ID) return;
-
-  try {
-    await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
-      chat_id: TG_USER_ID,
-      text: `${title}\n\n${content}`,
-      parse_mode: "HTML"
-    });
-  } catch (e) {
-    console.log("TG失败:", e.message);
-  }
+  return {
+    retcode: -1,
+    retmsg: "all proxy failed"
+  };
 }
 
 /**
@@ -185,38 +162,43 @@ async function runAccount(account, index, total) {
   console.log(`\n===== ${tag} START =====\n`);
 
   let data = await fetchApi("queryBalanceAndBonus", account);
-  msgs.push(`💰 当前余额：${data?.result?.balance || 0}`);
+  msgs.push(`💰 余额：${data?.result?.balance || 0}`);
 
   data = await fetchApi("checkIn", account);
-  msgs.push(`签到：${data?.retmsg || "OK"}`);
+  msgs.push(`签到：${data?.retmsg || "ok"}`);
 
-  /**
-   * 视频奖励（重点：风控识别）
-   */
+  let blockedVideo = false;
+
   for (let i = 1; i <= MAX_VIDEO; i++) {
-    await sleep(VIDEO_DELAY);
+    await randomSleep();
 
     data = await fetchApi("videoBonus", account);
 
     // ❌ 风控直接停止
     if (isBlocked(data)) {
-      msgs.push(`⛔ 视频${i}：触发验证码 / 风控，停止执行`);
+      msgs.push(`⛔ 视频${i}：触发风控，停止`);
+      blockedVideo = true;
       break;
     }
 
-    if (data?.retcode !== 0) {
-      msgs.push(`⏸ 视频${i}：${data?.retmsg || "失败"}`);
+    // ❌ 0收益判断（核心）
+    if (isZeroReward(data)) {
+      msgs.push(`⚠️ 视频${i}：0收益（疑似降权）`);
+      blockedVideo = true;
       break;
     }
 
-    msgs.push(`🎬 视频${i}：+${data?.result?.bonus || 0}`);
+    msgs.push(`🎬 视频${i}：+${data?.result?.bonus}`);
+  }
+
+  if (blockedVideo) {
+    msgs.push("⚠️ 当前账号处于低收益/风控状态");
   }
 
   data = await fetchApi("queryBalanceAndBonus", account);
   msgs.push(`💰 最新余额：${data?.result?.balance || 0}`);
 
   console.log(msgs.join("\n"));
-  console.log(`\n===== ${tag} END =====\n`);
 
   return msgs.join("\n");
 }
@@ -228,11 +210,7 @@ async function runAccount(account, index, total) {
  */
 async function main() {
   const accounts = [
-    process.env.PINGME_DATA_1,
-    process.env.PINGME_DATA_2,
-    process.env.PINGME_DATA_3,
-    process.env.PINGME_DATA_4,
-    process.env.PINGME_DATA_5
+    process.env.PINGME_DATA_1
   ]
     .filter(Boolean)
     .map(x => {
@@ -245,27 +223,19 @@ async function main() {
     .filter(Boolean);
 
   if (!accounts.length) {
-    console.log("❌ 无账号");
+    console.log("no account");
     return;
   }
 
-  const results = [];
-
   for (let i = 0; i < accounts.length; i++) {
-    const res = await runAccount(accounts[i], i, accounts.length);
-    results.push(res);
+    await runAccount(accounts[i], i, accounts.length);
 
     if (i < accounts.length - 1) {
       await sleep(ACCOUNT_GAP);
     }
   }
 
-  const finalMsg = results.join("\n——————————\n");
-
-  console.log("\n===== ALL DONE =====\n");
-  console.log(finalMsg);
-
-  await sendTG("PingMe 完成", finalMsg);
+  console.log("\nDONE");
 }
 
 main();
