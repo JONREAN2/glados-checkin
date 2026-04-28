@@ -1,79 +1,43 @@
+// 文件路径：pingme.js
+
+/**
+ * PingMe GitHub Actions版自动签到 + 视频奖励 + TG通知
+ *
+ * Secrets：
+ * PINGME_DATA_1
+ * PINGME_DATA_2
+ * PINGME_DATA_3
+ * PINGME_DATA_4
+ * PINGME_DATA_5
+ *
+ * TG_BOT_TOKEN
+ * TG_USER_ID
+ */
+
 const axios = require("axios");
 const crypto = require("crypto");
 
-/**
- * =========================
- * 代理池（自动切换）
- * =========================
- */
-const PROXIES = [
-  "https://proxy.showlo.gv.uy/?url=",
-  "https://proxy2.showlo.gv.uy/?url="
-];
-
-function proxyUrl(url, index = 0) {
-  return PROXIES[index] + encodeURIComponent(url);
-}
-
-/**
- * =========================
- * 配置
- * =========================
- */
 const SECRET = "0fOiukQq7jXZV2GRi9LGlO";
 const API_HOST = "api.pingmeapp.net";
 
-const MAX_VIDEO = 5;
-const ACCOUNT_GAP = 3000;
+// 👉 代理入口（新增：仅这一处变化）
+const PROXY = "http://proxy.showlo.gv.uy/?url=";
 
-/**
- * =========================
- * 工具
- * =========================
- */
+const MAX_VIDEO = 5;
+const VIDEO_DELAY = 8000;
+const ACCOUNT_GAP = 3500;
+
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || "";
+const TG_USER_ID = process.env.TG_USER_ID || "";
+
 function md5(str) {
   return crypto.createHash("md5").update(str).digest("hex");
 }
 
 function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// 随机延迟（反风控核心）
-function randomSleep(min = 3000, max = 9000) {
-  const t = Math.floor(Math.random() * (max - min) + min);
-  return sleep(t);
-}
-
-/**
- * =========================
- * 风控判断（关键）
- * =========================
- */
-function isBlocked(data) {
-  const msg = (data?.retmsg || "").toLowerCase();
-  return (
-    msg.includes("验证码") ||
-    msg.includes("captcha") ||
-    msg.includes("verify") ||
-    msg.includes("图形") ||
-    msg.includes("challenge")
-  );
-}
-
-// 👉 判断是否“被降权（0收益）”
-function isZeroReward(data) {
-  const bonus = data?.result?.bonus;
-
-  // 明确 0 或 null 或 undefined
-  return bonus === 0 || bonus === "0" || bonus == null;
-}
-
-/**
- * =========================
- * 签名
- * =========================
- */
 function getUTCSignDate() {
   const now = new Date();
   const pad = n => String(n).padStart(2, "0");
@@ -112,110 +76,138 @@ function buildUrl(path, account) {
   return `https://${API_HOST}/app/${path}?${qs}`;
 }
 
+// 👉 只动这里：走 CF Worker
+function proxyUrl(url) {
+  return PROXY + encodeURIComponent(url);
+}
+
 function buildHeaders(account) {
   return {
     Host: API_HOST,
     Accept: "application/json",
-    "User-Agent": account.headers?.["User-Agent"] || "PingMe/1.9.3"
+    "Accept-Language": "zh-Hans-CN;q=1.0",
+    "Accept-Encoding": "gzip, deflate, br",
+    "User-Agent":
+      account.headers?.["User-Agent"] || "PingMe/1.9.3"
   };
 }
 
-/**
- * =========================
- * 请求（双proxy）
- * =========================
- */
 async function fetchApi(path, account) {
   const rawUrl = buildUrl(path, account);
+
+  // 👉 关键修改点：全部走 Cloudflare Worker
+  const url = proxyUrl(rawUrl);
+
   const headers = buildHeaders(account);
 
-  for (let i = 0; i < PROXIES.length; i++) {
-    const url = proxyUrl(rawUrl, i);
+  try {
+    const resp = await axios.get(url, {
+      headers,
+      timeout: 20000
+    });
 
-    try {
-      const res = await axios.get(url, {
-        headers,
-        timeout: 20000
-      });
-
-      return res.data;
-    } catch (e) {
-      console.log(`⚠️ Proxy${i + 1} fail`);
-    }
+    return resp.data;
+  } catch (e) {
+    return {
+      retcode: -1,
+      retmsg: e.message || "请求失败"
+    };
   }
-
-  return {
-    retcode: -1,
-    retmsg: "all proxy failed"
-  };
 }
 
-/**
- * =========================
- * 单账号执行
- * =========================
- */
+async function sendTG(title, content) {
+  if (!TG_BOT_TOKEN || !TG_USER_ID) {
+    console.log("未配置 TG 推送");
+    return;
+  }
+
+  const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
+
+  try {
+    await axios.post(
+      url,
+      {
+        chat_id: TG_USER_ID,
+        text: `${title}\n\n${content}`,
+        parse_mode: "HTML",
+        disable_web_page_preview: true
+      },
+      {
+        timeout: 20000
+      }
+    );
+
+    console.log("✅ TG推送成功");
+  } catch (e) {
+    console.log("❌ TG推送失败：" + (e.message || e));
+  }
+}
+
 async function runAccount(account, index, total) {
-  const tag = `[账号${index + 1}/${total}]`;
+  const tag = `[账号${index + 1}/${total} ${account.alias || "未命名"}]`;
   const msgs = [tag];
 
-  console.log(`\n===== ${tag} START =====\n`);
+  console.log(`\n========== ${tag} 开始 ==========\n`);
 
   let data = await fetchApi("queryBalanceAndBonus", account);
-  msgs.push(`💰 余额：${data?.result?.balance || 0}`);
+
+  if (data.retcode === 0) {
+    msgs.push(`💰 当前余额：${data.result?.balance || 0} Coins`);
+  } else {
+    msgs.push(`⚠️ 查询失败：${data.retmsg}`);
+  }
 
   data = await fetchApi("checkIn", account);
-  msgs.push(`签到：${data?.retmsg || "ok"}`);
 
-  let blockedVideo = false;
+  if (data.retcode === 0) {
+    msgs.push(
+      `✅ 签到成功：${
+        (data.result?.bonusHint || data.retmsg || "").replace(/\n/g, " ")
+      }`
+    );
+  } else {
+    msgs.push(`⚠️ 签到状态：${data.retmsg}`);
+  }
 
   for (let i = 1; i <= MAX_VIDEO; i++) {
-    await randomSleep();
+    if (i > 1) {
+      await sleep(VIDEO_DELAY);
+    }
 
     data = await fetchApi("videoBonus", account);
 
-    // ❌ 风控直接停止
-    if (isBlocked(data)) {
-      msgs.push(`⛔ 视频${i}：触发风控，停止`);
-      blockedVideo = true;
+    if (data.retcode === 0) {
+      msgs.push(`🎬 视频${i}：+${data.result?.bonus || "?"} Coins`);
+    } else {
+      msgs.push(`⏸ 视频${i}：${data.retmsg}`);
       break;
     }
-
-    // ❌ 0收益判断（核心）
-    if (isZeroReward(data)) {
-      msgs.push(`⚠️ 视频${i}：0收益（疑似降权）`);
-      blockedVideo = true;
-      break;
-    }
-
-    msgs.push(`🎬 视频${i}：+${data?.result?.bonus}`);
-  }
-
-  if (blockedVideo) {
-    msgs.push("⚠️ 当前账号处于低收益/风控状态");
   }
 
   data = await fetchApi("queryBalanceAndBonus", account);
-  msgs.push(`💰 最新余额：${data?.result?.balance || 0}`);
+
+  if (data.retcode === 0) {
+    msgs.push(`💰 最新余额：${data.result?.balance || 0} Coins`);
+  }
 
   console.log(msgs.join("\n"));
+  console.log(`\n========== ${tag} 结束 ==========\n`);
 
   return msgs.join("\n");
 }
 
-/**
- * =========================
- * 主函数
- * =========================
- */
 async function main() {
   const accounts = [
-    process.env.PINGME_DATA_1
+    process.env.PINGME_DATA_1,
+    process.env.PINGME_DATA_2,
+    process.env.PINGME_DATA_3,
+    process.env.PINGME_DATA_4,
+    process.env.PINGME_DATA_5
   ]
     .filter(Boolean)
-    .map(x => {
+    .map(item => {
       try {
-        return JSON.parse(x);
+        return JSON.parse(item);
       } catch {
         return null;
       }
@@ -223,19 +215,30 @@ async function main() {
     .filter(Boolean);
 
   if (!accounts.length) {
-    console.log("no account");
+    console.log("❌ 没有可执行账号");
     return;
   }
 
+  const results = [];
+
   for (let i = 0; i < accounts.length; i++) {
-    await runAccount(accounts[i], i, accounts.length);
+    const result = await runAccount(accounts[i], i, accounts.length);
+    results.push(result);
 
     if (i < accounts.length - 1) {
       await sleep(ACCOUNT_GAP);
     }
   }
 
-  console.log("\nDONE");
+  const finalMsg = results.join("\n————————————\n");
+
+  console.log("\n==============================");
+  console.log("🎉 全部任务执行完成");
+  console.log("==============================\n");
+
+  console.log(finalMsg);
+
+  await sendTG("🎉 PingMe 签到完成", finalMsg);
 }
 
 main();
