@@ -1,5 +1,3 @@
-// 文件路径：pingme.js
-
 /**
  * PingMe GitHub Actions版自动签到 + 视频奖励 + TG通知
  *
@@ -19,9 +17,6 @@ const crypto = require("crypto");
 
 const SECRET = "0fOiukQq7jXZV2GRi9LGlO";
 const API_HOST = "api.pingmeapp.net";
-
-// 👉 代理入口（新增：仅这一处变化）
-const PROXY = "http://proxy.showlo.gv.uy/?url=";
 
 const MAX_VIDEO = 5;
 const VIDEO_DELAY = 8000;
@@ -76,11 +71,6 @@ function buildUrl(path, account) {
   return `https://${API_HOST}/app/${path}?${qs}`;
 }
 
-// 👉 只动这里：走 CF Worker
-function proxyUrl(url) {
-  return PROXY + encodeURIComponent(url);
-}
-
 function buildHeaders(account) {
   return {
     Host: API_HOST,
@@ -93,11 +83,7 @@ function buildHeaders(account) {
 }
 
 async function fetchApi(path, account) {
-  const rawUrl = buildUrl(path, account);
-
-  // 👉 关键修改点：全部走 Cloudflare Worker
-  const url = proxyUrl(rawUrl);
-
+  const url = buildUrl(path, account);
   const headers = buildHeaders(account);
 
   try {
@@ -235,7 +221,6 @@ async function main() {
   console.log("\n==============================");
   console.log("🎉 全部任务执行完成");
   console.log("==============================\n");
-
   console.log(finalMsg);
 
   await sendTG("🎉 PingMe 签到完成", finalMsg);
